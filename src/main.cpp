@@ -165,6 +165,20 @@ String lastBackendContactText() {
   return String(ageSeconds) + "s ago";
 }
 
+String localIpText() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return "not connected";
+  }
+  return WiFi.localIP().toString();
+}
+
+String controllerDisplay() {
+  if (mode == Mode::Claimed && mqttHost.length() > 0) {
+    return String("mqtts://") + mqttHost + ":" + mqttPort;
+  }
+  return savedController.length() ? savedController : String("not configured");
+}
+
 void refreshMqttConnectionState() {
   bool connectedNow = mqttClient.connected();
   if (wasMqttConnected && !connectedNow) {
@@ -702,8 +716,47 @@ String htmlPage() {
   return page;
 }
 
+String claimedStatusPage() {
+  String page;
+  page.reserve(5600);
+  page += F("<!doctype html><html lang='en'><head><meta charset='utf-8'>");
+  page += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+  page += F("<title>AI Connect Bridge</title><style>");
+  page += F(":root{color-scheme:dark;--panel:#171d22;--line:#2b353d;--text:#eef4f8;--muted:#9fb0bb;--accent:#28c7a7;--blue:#4aa3ff}");
+  page += F("*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#101418;color:var(--text)}");
+  page += F("main{width:min(860px,100%);margin:0 auto;padding:32px 18px}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:22px}");
+  page += F("h1{font-size:30px;margin:0;letter-spacing:0}.sub{color:var(--muted);margin-top:7px;line-height:1.5}.pill{border:1px solid var(--line);border-radius:999px;padding:8px 12px;color:var(--accent);white-space:nowrap;background:#11191d}");
+  page += F(".panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.item{border-top:1px solid var(--line);padding:13px 0}.label{color:var(--muted);font-size:13px;margin-bottom:4px}.value{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--blue);overflow-wrap:anywhere}");
+  page += F(".state{font-size:22px;font-weight:750;margin:6px 0 16px}.ok{color:var(--accent)}.warn{color:#ffcf66}.bad{color:#ff7a7a}@media(max-width:700px){.top{display:block}.pill{display:inline-block;margin-top:12px}.grid{grid-template-columns:1fr}}");
+  page += F("</style></head><body><main><div class='top'><div><h1>AI Connect Bridge</h1><div class='sub'>This device is claimed and operating as an RS232 console bridge for the AI Connect platform.</div></div><div class='pill'>Firmware ");
+  page += kFirmwareVersion;
+  page += F("</div></div><section class='panel'><div class='label'>Platform status</div><div class='state' id='state'>");
+  page += htmlEscape(backendConnectionState);
+  page += F("</div><div class='grid'>");
+  page += F("<div class='item'><div class='label'>Device type</div><div class='value'>");
+  page += kHardwareModel;
+  page += F("</div></div><div class='item'><div class='label'>Device ID</div><div class='value'>");
+  page += deviceId;
+  page += F("</div></div><div class='item'><div class='label'>Backend</div><div class='value' id='controller'>");
+  page += htmlEscape(controllerDisplay());
+  page += F("</div></div><div class='item'><div class='label'>Local IP</div><div class='value' id='localIp'>");
+  page += localIpText();
+  page += F("</div></div><div class='item'><div class='label'>Last sync</div><div class='value' id='lastSync'>");
+  page += lastBackendContactText();
+  page += F("</div></div><div class='item'><div class='label'>Last MQTT error</div><div class='value' id='mqttError'>");
+  page += htmlEscape(lastMqttError);
+  page += F("</div></div><div class='item'><div class='label'>Contract</div><div class='value'>");
+  page += kTopicPrefix;
+  page += F("</div></div><div class='item'><div class='label'>Heartbeat sequence</div><div class='value' id='seq'>");
+  page += heartbeatSeq;
+  page += F("</div></div></div></section><script>");
+  page += F("async function refresh(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());const s=document.getElementById('state');s.textContent=d.backend_connection_state;s.className='state '+(d.backend_connection_state==='Connected to Backend'?'ok':(d.backend_connection_state==='Connecting to Backend'?'warn':'bad'));document.getElementById('controller').textContent=d.controller;document.getElementById('localIp').textContent=d.local_ip;document.getElementById('lastSync').textContent=d.last_backend_contact;document.getElementById('mqttError').textContent=d.last_mqtt_error;document.getElementById('seq').textContent=d.heartbeat_seq;}catch(e){}}setInterval(refresh,3000);refresh();");
+  page += F("</script></main></body></html>");
+  return page;
+}
+
 void handleRoot() {
-  server.send(200, "text/html", htmlPage());
+  server.send(200, "text/html", mode == Mode::Claimed ? claimedStatusPage() : htmlPage());
 }
 
 void handleWifiScan() {
@@ -782,12 +835,15 @@ void handleClaimStatus() {
 void handleDiagnostics() {
   String body = "{";
   body += "\"device_id\":\"" + jsonEscape(deviceId) + "\",";
-  body += "\"controller\":\"" + jsonEscape(savedController.length() ? savedController : String("not configured")) + "\",";
+  body += "\"controller\":\"" + jsonEscape(controllerDisplay()) + "\",";
   body += "\"claim_state\":\"" + jsonEscape(claimed ? String("claimed") : claimStatus) + "\",";
   body += "\"backend_connection_state\":\"" + jsonEscape(backendConnectionState) + "\",";
   body += "\"last_backend_contact\":\"" + jsonEscape(lastBackendContactText()) + "\",";
   body += "\"last_backend_contact_ms\":" + String(lastBackendContactMs) + ",";
   body += "\"last_mqtt_error\":\"" + jsonEscape(lastMqttError) + "\",";
+  body += "\"local_ip\":\"" + jsonEscape(localIpText()) + "\",";
+  body += "\"heartbeat_seq\":" + String(heartbeatSeq) + ",";
+  body += "\"hardware_model\":\"" + String(kHardwareModel) + "\",";
   body += "\"firmware_version\":\"" + String(kFirmwareVersion) + "\",";
   body += "\"contract_version\":\"" + String(kTopicPrefix) + "\"";
   body += "}";
@@ -795,8 +851,12 @@ void handleDiagnostics() {
 }
 
 void handleNotFound() {
-  server.sendHeader("Location", "http://192.168.4.1/", true);
-  server.send(302, "text/plain", "");
+  if (mode == Mode::Setup) {
+    server.sendHeader("Location", "http://192.168.4.1/", true);
+    server.send(302, "text/plain", "");
+  } else {
+    server.send(200, "text/html", claimedStatusPage());
+  }
 }
 
 void startSetupAp() {
@@ -822,6 +882,10 @@ void startSetupAp() {
 
 void startClaimedMode() {
   WiFi.mode(WIFI_STA);
+  server.on("/", handleRoot);
+  server.on("/api/diagnostics", HTTP_GET, handleDiagnostics);
+  server.onNotFound(handleNotFound);
+  server.begin();
   ledState = LedState::Wifi;
   Serial.printf("\nAI Connect claimed mode\nDevice ID: %s\nMQTT: %s:%u\n",
                 deviceId.c_str(), mqttHost.c_str(), mqttPort);
@@ -883,6 +947,7 @@ void loop() {
     runClaimLoop();
   } else {
     runClaimedLoop();
+    server.handleClient();
   }
   mqttClient.loop();
   refreshMqttConnectionState();
