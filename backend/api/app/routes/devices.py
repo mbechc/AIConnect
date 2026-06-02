@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.db import db
+from app.device_reset import request_factory_reset
 from app.security import require_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -24,6 +25,11 @@ class DevicePatch(BaseModel):
     display_name: str | None = Field(default=None, max_length=120)
     state: str | None = Field(default=None, pattern="^(claimed|disabled|revoked)$")
     firmware_version: str | None = Field(default=None, max_length=40)
+
+
+class DeviceFactoryResetRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=200)
+    delete_record: bool = False
 
 
 def add_presence(row: dict, now: datetime | None = None) -> dict:
@@ -127,3 +133,16 @@ def disable_device(device_id: str) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="device not found")
     return add_presence(row)
+
+
+@router.post("/devices/{device_id}/factory-reset")
+def factory_reset_device(device_id: str, payload: DeviceFactoryResetRequest) -> dict:
+    result = request_factory_reset(
+        device_id=device_id,
+        reason=payload.reason,
+        delete_record=payload.delete_record,
+        actor_type="api",
+    )
+    if result.get("error") == "device-not-found":
+        raise HTTPException(status_code=404, detail="device not found")
+    return result

@@ -65,10 +65,14 @@ create table if not exists serial_sessions (
 create table if not exists serial_session_logs (
   id bigserial primary key,
   session_id uuid not null references serial_sessions(id) on delete cascade,
+  device_id text,
+  actor_type text,
+  actor_id text,
   direction text not null check (direction in ('rx', 'tx', 'event')),
   payload_base64 text,
   payload_text_preview text,
   byte_count integer not null default 0,
+  metadata_json jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
 
@@ -88,4 +92,6 @@ create index if not exists devices_last_seen_idx on devices(last_seen_at);
 create index if not exists claim_codes_state_idx on claim_codes(state);
 create index if not exists serial_sessions_device_state_idx on serial_sessions(device_id, state);
 create index if not exists serial_session_logs_session_idx on serial_session_logs(session_id, created_at);
+create index if not exists serial_session_logs_device_created_idx on serial_session_logs(device_id, created_at);
+create index if not exists serial_session_logs_actor_created_idx on serial_session_logs(actor_type, actor_id, created_at);
 create index if not exists device_events_device_created_idx on device_events(device_id, created_at);

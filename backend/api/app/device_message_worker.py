@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from threading import Event
@@ -9,6 +10,7 @@ from psycopg.rows import dict_row
 from app.config import settings
 from app.db import pool
 from app.mqtt import TOPIC_PREFIX
+from app.serial_audit import log_serial_event, log_serial_payload
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,7 @@ DEVICE_ORIGIN_SUBSCRIPTIONS = (
     f"{TOPIC_PREFIX}/devices/+/heartbeat",
     f"{TOPIC_PREFIX}/devices/+/status",
     f"{TOPIC_PREFIX}/devices/+/event",
+    f"{TOPIC_PREFIX}/devices/+/events",
     f"{TOPIC_PREFIX}/devices/+/sessions/+/rx",
     f"{TOPIC_PREFIX}/devices/+/sessions/+/opened",
     f"{TOPIC_PREFIX}/devices/+/sessions/+/closed",
@@ -31,7 +34,7 @@ class DeviceMessageWorker:
             client_id=settings.mqtt_device_events_client_id,
             clean_session=True,
         )
-        self._client.username_pw_set("controller")
+        self._client.username_pw_set(settings.mqtt_backend_username, settings.mqtt_backend_password)
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
         self._client.on_disconnect = self._on_disconnect
@@ -71,6 +74,10 @@ class DeviceMessageWorker:
         touched = touch_device_last_seen(device_id, firmware_version)
         if not touched:
             logger.warning("ignoring message from unknown or inactive device: %s", device_id)
+            return
+
+        if parsed["kind"].startswith("session."):
+            process_serial_session_message(parsed, payload, message.payload)
 
 
 def parse_device_origin_topic(topic: str) -> dict[str, str] | None:
@@ -86,7 +93,7 @@ def parse_device_origin_topic(topic: str) -> dict[str, str] | None:
     if not device_id:
         return None
 
-    if len(rest) == 3 and rest[2] in {"heartbeat", "status", "event"}:
+    if len(rest) == 3 and rest[2] in {"heartbeat", "status", "event", "events"}:
         return {"device_id": device_id, "kind": rest[2]}
 
     if len(rest) == 5 and rest[2] == "sessions" and rest[4] in {"rx", "opened", "closed", "event"}:
@@ -148,3 +155,105 @@ def touch_device_last_seen(device_id: str, firmware_version: Any = None) -> bool
                 (firmware, device_id),
             )
             return cur.fetchone() is not None
+
+
+def process_serial_session_message(parsed: dict[str, str], payload: dict[str, Any] | None, raw_payload: bytes) -> None:
+    session_id = parsed.get("session_id")
+    if not session_id:
+        return
+
+    device_id = parsed["device_id"]
+    kind = parsed["kind"]
+    with pool.connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("select id, state from serial_sessions where id = %s and device_id = %s", (session_id, device_id))
+            session = cur.fetchone()
+            if session is None:
+                logger.warning("ignoring serial message for unknown session: %s", session_id)
+                return
+
+            if kind == "session.rx":
+                payload_base64 = extract_rx_base64(payload, raw_payload)
+                log_serial_payload(
+                    cur,
+                    session_id,
+                    device_id,
+                    "rx",
+                    payload_base64,
+                    actor_type="device",
+                    metadata=safe_metadata(payload),
+                )
+                return
+
+            event_name = kind.removeprefix("session.")
+            metadata = safe_metadata(payload)
+            if kind == "session.opened":
+                cur.execute(
+                    """
+                    update serial_sessions
+                    set state = 'active',
+                        opened_at = coalesce(opened_at, now()),
+                        updated_at = now()
+                    where id = %s
+                    """,
+                    (session_id,),
+                )
+                event_name = "session.active"
+            elif kind == "session.closed":
+                cur.execute(
+                    """
+                    update serial_sessions
+                    set state = 'closed',
+                        closed_at = coalesce(closed_at, now()),
+                        close_reason = coalesce(%s, close_reason, 'device-closed'),
+                        updated_at = now()
+                    where id = %s
+                    """,
+                    (metadata.get("reason"), session_id),
+                )
+                event_name = "session.closed"
+            elif kind == "session.event":
+                state = metadata.get("state")
+                if state in {"active", "closed", "failed"}:
+                    cur.execute(
+                        """
+                        update serial_sessions
+                        set state = %s,
+                            opened_at = case when %s = 'active' then coalesce(opened_at, now()) else opened_at end,
+                            closed_at = case when %s in ('closed', 'failed') then coalesce(closed_at, now()) else closed_at end,
+                            close_reason = case when %s in ('closed', 'failed') then coalesce(%s, close_reason) else close_reason end,
+                            updated_at = now()
+                        where id = %s
+                        """,
+                        (state, state, state, state, metadata.get("reason"), session_id),
+                    )
+                    event_name = f"session.{state}"
+                else:
+                    event_name = str(metadata.get("event") or "session.event")
+
+            log_serial_event(
+                cur,
+                session_id,
+                device_id,
+                event_name,
+                actor_type="device",
+                metadata=metadata,
+            )
+
+
+def extract_rx_base64(payload: dict[str, Any] | None, raw_payload: bytes) -> str:
+    if payload:
+        for key in ("payload_base64", "data_base64", "data"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                if key == "data":
+                    return base64.b64encode(value.encode("utf-8")).decode("ascii")
+                return value
+    return base64.b64encode(raw_payload).decode("ascii")
+
+
+def safe_metadata(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not payload:
+        return {}
+    blocked = {"payload_base64", "data_base64", "data", "claim_code", "password"}
+    return {key: value for key, value in payload.items() if key not in blocked}

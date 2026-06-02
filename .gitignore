@@ -1,3 +1,8 @@
 .platformio-core/
 .pio/
-
+.DS_Store
+._*
+backend/.env
+backend/certs/*.crt
+backend/certs/*.key
+backend/certs/*.pem

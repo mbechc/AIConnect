@@ -15,17 +15,35 @@ services:
       timeout: 5s
       retries: 10
 
+  migrate:
+    image: postgres:17-alpine
+    restart: "no"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migrations:/migrations:ro
+    command:
+      - sh
+      - -c
+      - |
+        for migration in /migrations/*.sql; do
+          echo "applying $${migration}"
+          psql "$${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "$${migration}"
+        done
+
   api:
     build: ./api
     restart: unless-stopped
     env_file: .env
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       emqx:
         condition: service_started
     ports:
-      - "127.0.0.1:${API_PORT:-8000}:8000"
+      - "${API_BIND_HOST:-127.0.0.1}:${API_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
       interval: 15s
@@ -37,22 +55,58 @@ services:
     restart: unless-stopped
     env_file: .env
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       emqx:
         condition: service_started
     command: ["python", "-m", "app.mcp_server"]
     ports:
-      - "127.0.0.1:${MCP_PORT:-8001}:8001"
+      - "${MCP_BIND_HOST:-127.0.0.1}:${MCP_PORT:-8001}:8001"
 
   emqx:
     image: emqx/emqx:5.8.6
     restart: unless-stopped
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       EMQX_NAME: aiconnect
       EMQX_HOST: 127.0.0.1
       EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_DASHBOARD_USER:-admin}
       EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:-change-me-dashboard-password}
+      EMQX_AUTHENTICATION: >-
+        [
+          {
+            mechanism = password_based
+            backend = postgresql
+            password_hash_algorithm = {name = sha256, salt_position = disable}
+            database = "${POSTGRES_DB:-aiconnect}"
+            username = "${POSTGRES_USER:-aiconnect}"
+            password = "${POSTGRES_PASSWORD:-change-me}"
+            server = "postgres:5432"
+            query = "SELECT password_hash, salt, is_superuser FROM mqtt_auth_users WHERE username = $${username} LIMIT 1"
+            disable_prepared_statements = false
+          }
+        ]
+      EMQX_AUTHORIZATION: >-
+        {
+          no_match = deny
+          deny_action = ignore
+          cache = {enable = false}
+          sources = [
+            {
+              type = postgresql
+              enable = true
+              database = "${POSTGRES_DB:-aiconnect}"
+              username = "${POSTGRES_USER:-aiconnect}"
+              password = "${POSTGRES_PASSWORD:-change-me}"
+              server = "postgres:5432"
+              query = "SELECT permission, action, topic FROM mqtt_acl_rules WHERE username = $${username}"
+              disable_prepared_statements = false
+            }
+          ]
+        }
     volumes:
       - emqx_data:/opt/emqx/data
       - emqx_log:/opt/emqx/log
@@ -61,7 +115,7 @@ services:
       - ./certs:/opt/emqx/etc/certs:ro
     ports:
       - "8883:8883"
-      - "127.0.0.1:18083:18083"
+      - "${EMQX_DASHBOARD_BIND_HOST:-127.0.0.1}:${EMQX_DASHBOARD_PORT:-18083}:18083"
 
   caddy:
     image: caddy:2.8-alpine

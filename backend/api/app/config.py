@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     mqtt_api_client_id: str = "aiconnect-controller"
     mqtt_device_events_client_id: str = "aiconnect-device-events"
     mqtt_mcp_client_id: str = "aiconnect-mcp"
+    mqtt_backend_username: str = "aiconnect-backend"
+    mqtt_backend_password: str = "change-me-backend-mqtt-password"
+    mqtt_provisioning_username: str = "aiconnect-provisioning"
+    mqtt_provisioning_password: str = "change-me-provisioning-mqtt-password"
     device_online_freshness_seconds: int = 120
     public_base_url: str = "https://mqtts.itego.dk"
     mcp_host: str = "0.0.0.0"

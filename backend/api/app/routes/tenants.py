@@ -18,6 +18,10 @@ class SiteCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
 
 
+class TenantNamePatch(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+
 @router.post("/organizations", status_code=status.HTTP_201_CREATED)
 def create_organization(payload: OrganizationCreate) -> dict:
     with db() as cur:
@@ -46,6 +50,24 @@ def list_organizations() -> list[dict]:
         return list(cur.fetchall())
 
 
+@router.patch("/organizations/{organization_id}")
+def patch_organization(organization_id: UUID, payload: TenantNamePatch) -> dict:
+    with db() as cur:
+        cur.execute(
+            """
+            update organizations
+            set name = %s
+            where id = %s
+            returning id, name, created_at
+            """,
+            (payload.name, organization_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    return row
+
+
 @router.post("/sites", status_code=status.HTTP_201_CREATED)
 def create_site(payload: SiteCreate) -> dict:
     with db() as cur:
@@ -61,6 +83,24 @@ def create_site(payload: SiteCreate) -> dict:
             (payload.organization_id, payload.name),
         )
         return cur.fetchone()
+
+
+@router.patch("/sites/{site_id}")
+def patch_site(site_id: UUID, payload: TenantNamePatch) -> dict:
+    with db() as cur:
+        cur.execute(
+            """
+            update sites
+            set name = %s
+            where id = %s
+            returning id, organization_id, name, created_at
+            """,
+            (payload.name, site_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    return row
 
 
 @router.get("/sites")

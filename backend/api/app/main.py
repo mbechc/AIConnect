@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.claim_worker import ClaimWorker
-from app.db import close_pool, open_pool
+from app.db import close_pool, ensure_mqtt_service_credentials, open_pool
 from app.device_message_worker import DeviceMessageWorker
 from app.routes import claims, devices, health, sessions, tenants
 
@@ -11,6 +11,7 @@ from app.routes import claims, devices, health, sessions, tenants
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     open_pool()
+    ensure_mqtt_service_credentials()
     claim_worker = ClaimWorker()
     device_message_worker = DeviceMessageWorker()
     claim_worker.start()

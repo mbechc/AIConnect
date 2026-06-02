@@ -30,7 +30,7 @@ class ClaimWorker:
             client_id=settings.mqtt_api_client_id,
             clean_session=True,
         )
-        self._client.username_pw_set("controller")
+        self._client.username_pw_set(settings.mqtt_backend_username, settings.mqtt_backend_password)
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
         self._client.on_disconnect = self._on_disconnect

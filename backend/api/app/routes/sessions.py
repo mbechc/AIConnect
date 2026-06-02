@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from app.db import db
 from app.mqtt import session_topic
 from app.security import require_admin
+from app.serial_audit import decode_base64, find_active_session, log_serial_event, log_serial_payload
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -56,6 +57,20 @@ def create_session(device_id: str, payload: SessionCreate) -> dict:
             ),
         )
         row = cur.fetchone()
+        log_serial_event(
+            cur,
+            row["id"],
+            device_id,
+            "session.open_requested",
+            actor_type="api",
+            metadata={
+                "baud": payload.baud,
+                "data_bits": payload.data_bits,
+                "parity": payload.parity,
+                "stop_bits": payload.stop_bits,
+                "flow_control": payload.flow_control,
+            },
+        )
     row["mqtt_open_topic"] = session_topic(device_id, str(row["id"]), "open")
     return row
 
@@ -82,20 +97,24 @@ def get_session(session_id: UUID) -> dict:
 
 @router.post("/sessions/{session_id}/tx", status_code=status.HTTP_202_ACCEPTED)
 def record_tx(session_id: UUID, payload: SessionTx) -> dict:
+    try:
+        decode_base64(payload.data_base64)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid base64 payload") from None
+
     with db() as cur:
-        cur.execute("select id, device_id from serial_sessions where id = %s", (session_id,))
-        session = cur.fetchone()
+        session = find_active_session(cur, session_id)
         if session is None:
-            raise HTTPException(status_code=404, detail="session not found")
-        cur.execute(
-            """
-            insert into serial_session_logs (session_id, direction, payload_base64, byte_count)
-            values (%s, 'tx', %s, length(decode(%s, 'base64')))
-            returning id, created_at
-            """,
-            (session_id, payload.data_base64, payload.data_base64),
+            raise HTTPException(status_code=404, detail="active session not found")
+        row = log_serial_payload(
+            cur,
+            session_id,
+            session["device_id"],
+            "tx",
+            payload.data_base64,
+            actor_type="api",
+            metadata={"seq": payload.seq},
         )
-        row = cur.fetchone()
     return {
         **row,
         "mqtt_tx_topic": session_topic(session["device_id"], str(session_id), "tx"),
@@ -116,6 +135,15 @@ def close_session(session_id: UUID) -> dict:
             (session_id,),
         )
         row = cur.fetchone()
+        if row is not None:
+            log_serial_event(
+                cur,
+                session_id,
+                row["device_id"],
+                "session.close_requested",
+                actor_type="api",
+                metadata={"reason": "api-request"},
+            )
     if row is None:
         raise HTTPException(status_code=404, detail="session not found")
     row["mqtt_close_topic"] = session_topic(row["device_id"], str(session_id), "close")
@@ -127,7 +155,8 @@ def get_session_log(session_id: UUID) -> list[dict]:
     with db() as cur:
         cur.execute(
             """
-            select id, direction, payload_base64, payload_text_preview, byte_count, created_at
+            select id, session_id, device_id, actor_type, actor_id, direction,
+                   payload_base64, payload_text_preview, byte_count, metadata_json, created_at
             from serial_session_logs
             where session_id = %s
             order by created_at asc, id asc

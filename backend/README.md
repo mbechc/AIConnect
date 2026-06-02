@@ -13,11 +13,34 @@ Self-hosted controller PoC for M5Atom Lite RS232 console bridges.
 ## First Boot
 
 ```sh
+git clone https://github.com/mbechc/AIConnect.git
+cd AIConnect/backend
 cp .env.example .env
 vi .env
 docker compose up -d --build
 docker compose ps
 ```
+
+Smoke check after deploy:
+
+```sh
+./scripts/smoke-check.sh
+```
+
+Before starting the stack, replace every `change-me` value in `.env`. At minimum set:
+
+- `POSTGRES_PASSWORD`
+- `DATABASE_URL`, using the same PostgreSQL password
+- `API_ADMIN_TOKEN`
+- `MQTT_BACKEND_PASSWORD`
+- `MQTT_PROVISIONING_PASSWORD`
+- `EMQX_DASHBOARD_PASSWORD`
+
+Default host bindings keep the API, MCP, and EMQX dashboard on `127.0.0.1`. Caddy exposes the public HTTPS API. If you deliberately want to expose an admin surface directly, set the matching bind host to `0.0.0.0`:
+
+- `API_BIND_HOST`
+- `MCP_BIND_HOST`
+- `EMQX_DASHBOARD_BIND_HOST`
 
 Health checks:
 
@@ -32,10 +55,10 @@ Public API should be served by Caddy at:
 https://mqtts.itego.dk
 ```
 
-Local MCP endpoint:
+MCP endpoint, bound on the host network:
 
 ```text
-http://127.0.0.1:8001/mcp
+http://<backend-host>:8001/mcp
 ```
 
 MQTT TLS endpoint:
@@ -43,6 +66,49 @@ MQTT TLS endpoint:
 ```text
 mqtts://mqtts.itego.dk:8883
 ```
+
+## Deploy And Upgrade
+
+The deployable backend is fully described by this directory:
+
+- `compose.yaml`
+- `.env.example`
+- `api/`
+- `caddy/`
+- `db/migrations/`
+- `emqx/`
+- `scripts/`
+- `certs/README.md`
+
+Runtime secrets and certificates are intentionally not committed:
+
+- `.env`
+- `certs/*.crt`
+- `certs/*.key`
+- `certs/*.pem`
+
+Upgrade from Git:
+
+```sh
+cd /opt/aiconnect
+git pull --ff-only
+docker compose up -d --build
+docker compose ps
+```
+
+The `migrate` service applies every SQL file in `db/migrations/` on each deploy before `api`, `mcp`, and `emqx` start. Migrations must remain idempotent because they are also used for fresh database initialization.
+
+## MQTT Authentication
+
+EMQX requires username/password authentication. Credentials are checked against PostgreSQL:
+
+- Backend workers use `MQTT_BACKEND_USERNAME` / `MQTT_BACKEND_PASSWORD`.
+- Unclaimed Bridges use `MQTT_PROVISIONING_USERNAME` / `MQTT_PROVISIONING_PASSWORD`.
+- Claimed Bridges use per-device credentials generated during claim and stored by the Bridge until factory reset.
+
+The provisioning credential is only allowed to publish `aic/v1/claim/request` and subscribe to `aic/v1/claim/response/{clientid}`. The Bridge must use its `device_id` as MQTT client id during provisioning so the response topic lines up.
+
+Claimed Bridge credentials are only valid while the device row is `claimed`; disabled/revoked devices disappear from the EMQX auth views. Device ACL rows are scoped to `aic/v1/devices/{device_id}/...`.
 
 ## MCP Operations
 
@@ -113,17 +179,61 @@ All `/v1/*` routes require `Authorization: Bearer $API_ADMIN_TOKEN`.
 
 - `POST /v1/organizations`
 - `GET /v1/organizations`
+- `PATCH /v1/organizations/{organization_id}`
 - `POST /v1/sites`
 - `GET /v1/sites`
+- `PATCH /v1/sites/{site_id}`
 - `POST /v1/claim-codes`
 - `GET /v1/claim-codes`
 - `POST /v1/claim-codes/{claim_code_id}/revoke`
 - `GET /v1/devices`
 - `GET /v1/devices/{device_id}`
 - `POST /v1/devices/{device_id}/disable`
-- `POST /v1/devices/{device_id}/revoke`
+- `POST /v1/devices/{device_id}/factory-reset`
 
 Claim codes must be site-bound, random, one-time-use, and short-lived. The device never chooses organization or site; the operator assigns that through the backend by creating the claim code for a site.
+
+## Factory Reset
+
+Admins and MCP operators can request a physical Bridge factory reset:
+
+```sh
+curl -X POST \
+  -H "Authorization: Bearer $API_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"operator-request","delete_record":false}' \
+  http://127.0.0.1:8000/v1/devices/DEVICE_ID/factory-reset
+```
+
+If the device is currently claimed and online, the backend publishes:
+
+```text
+aic/v1/devices/{device_id}/commands/factory-reset
+```
+
+Payload:
+
+```json
+{
+  "command": "factory_reset",
+  "device_id": "...",
+  "reason": "...",
+  "requested_at": "<backend-server-time>",
+  "delete_record": false
+}
+```
+
+The backend immediately revokes the device, clears stored MQTT credential material, marks active sessions failed with `factory-reset-requested`, and writes an audit event. The first implementation preserves device/session/event/audit history even when `delete_record` is requested; `delete_record` is passed to the Bridge command but no hard database delete is performed.
+
+## Serial Audit Logging
+
+Serial sessions are the audit trail for AI/operator interaction with the real device behind the Bridge. The backend logs:
+
+- every backend-to-device serial input as `tx`
+- every device-to-backend serial output as `rx`
+- lifecycle events such as open requested, active, closed, failed, and factory reset requested
+
+Serial log rows include session id, device id, actor type, optional actor id, direction, payload base64, text preview, byte count, metadata, and backend-created timestamp. Claim codes and MQTT passwords must not be written to serial logs.
 
 ## Manual Claim Verification
 
@@ -153,4 +263,10 @@ Claim codes must be site-bound, random, one-time-use, and short-lived. The devic
 - Use TLS on MQTT before field devices connect.
 - Claim codes are stored as SHA-256 hashes.
 - Do not log claim codes or issued MQTT passwords.
-- Current PoC ACL constrains topic shape by MQTT client id. Production must switch EMQX to PostgreSQL-backed authentication and authorization so issued credentials and device state (`claimed`, `disabled`, `revoked`) are enforced by the broker.
+- EMQX uses PostgreSQL-backed authentication and authorization so issued credentials and device state (`claimed`, `disabled`, `revoked`) are enforced by the broker.
+- Manual MQTT auth checks:
+  - anonymous connection must fail
+  - wrong password must fail
+  - provisioning credential can only use claim topics
+  - claimed credential can only use its own device topics
+  - revoked credential must fail on reconnect

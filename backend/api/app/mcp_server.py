@@ -1,5 +1,4 @@
 import atexit
-import base64
 import hashlib
 import json
 import secrets
@@ -12,9 +11,11 @@ from mcp.server.fastmcp import FastMCP
 from psycopg.rows import dict_row
 
 from app.config import settings
-from app.db import close_pool, open_pool, pool
+from app.db import close_pool, ensure_mqtt_service_credentials, open_pool, pool
+from app.device_reset import request_factory_reset
 from app.mqtt import session_topic
 from app.routes.devices import add_presence
+from app.serial_audit import decode_base64, encode_text, find_active_session, log_serial_event, log_serial_payload
 
 
 mcp = FastMCP("AI Connect", json_response=True, host=settings.mcp_host, port=settings.mcp_port)
@@ -42,11 +43,15 @@ def publish_mqtt(topic: str, payload: dict[str, Any]) -> dict[str, Any]:
         client_id=f"{settings.mqtt_mcp_client_id}-{secrets.token_hex(3)}",
         clean_session=True,
     )
-    client.username_pw_set("controller")
+    client.username_pw_set(settings.mqtt_backend_username, settings.mqtt_backend_password)
     client.connect(settings.mqtt_host, settings.mqtt_port, keepalive=30)
-    result = client.publish(topic, json.dumps(payload), qos=1, retain=False)
-    result.wait_for_publish(timeout=5)
-    client.disconnect()
+    client.loop_start()
+    try:
+        result = client.publish(topic, json.dumps(payload), qos=1, retain=False)
+        result.wait_for_publish(timeout=5)
+    finally:
+        client.loop_stop()
+        client.disconnect()
     return {"topic": topic, "published": result.is_published(), "rc": result.rc}
 
 
@@ -108,6 +113,26 @@ def list_organizations() -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+def rename_organization(organization_id: str, name: str) -> dict[str, Any]:
+    """Rename an existing organization without moving devices or sites."""
+    with pool.connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                update organizations
+                set name = %s
+                where id = %s
+                returning id, name, created_at
+                """,
+                (name, organization_id),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {"error": "organization-not-found"}
+    return jsonable(row)
+
+
+@mcp.tool()
 def create_site(organization_id: str, name: str) -> dict[str, Any]:
     """Create a site under an organization for device onboarding."""
     with pool.connection() as conn:
@@ -124,6 +149,26 @@ def create_site(organization_id: str, name: str) -> dict[str, Any]:
                 (organization_id, name),
             )
             return jsonable(cur.fetchone())
+
+
+@mcp.tool()
+def rename_site(site_id: str, name: str) -> dict[str, Any]:
+    """Rename an existing site without moving attached devices or claim codes."""
+    with pool.connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                update sites
+                set name = %s
+                where id = %s
+                returning id, organization_id, name, created_at
+                """,
+                (name, site_id),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {"error": "site-not-found"}
+    return jsonable(row)
 
 
 @mcp.tool()
@@ -177,7 +222,15 @@ def create_claim_code(site_id: str, expires_in_hours: int = 24, note: str | None
                 """,
                 (hash_claim_code(code), site_id, expires_at, note),
             )
-            return jsonable({"code": code, **cur.fetchone()})
+            row = cur.fetchone()
+            cur.execute(
+                """
+                insert into audit_events (actor_type, action, target_type, target_id, payload_json)
+                values ('mcp', 'claim_code.created', 'claim_code', %s, %s::jsonb)
+                """,
+                (str(row["id"]), json.dumps({"site_id": site_id})),
+            )
+            return jsonable({"code": code, **row})
 
 
 @mcp.tool()
@@ -249,6 +302,23 @@ def disable_device(device_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def request_device_factory_reset(
+    device_id: str,
+    reason: str | None = None,
+    delete_record: bool = False,
+) -> dict[str, Any]:
+    """Revoke a device, invalidate credentials, close sessions, and publish factory reset if online."""
+    return jsonable(
+        request_factory_reset(
+            device_id=device_id,
+            reason=reason,
+            delete_record=delete_record,
+            actor_type="mcp",
+        )
+    )
+
+
+@mcp.tool()
 def open_serial_session(
     device_id: str,
     baud: int = 9600,
@@ -282,6 +352,20 @@ def open_serial_session(
                 (device_id, baud, data_bits, parity, stop_bits, flow_control),
             )
             session = cur.fetchone()
+            log_serial_event(
+                cur,
+                session["id"],
+                device_id,
+                "session.open_requested",
+                actor_type="mcp",
+                metadata={
+                    "baud": baud,
+                    "data_bits": data_bits,
+                    "parity": parity,
+                    "stop_bits": stop_bits,
+                    "flow_control": flow_control,
+                },
+            )
 
     topic = session_topic(device_id, str(session["id"]), "open")
     publish = publish_mqtt(
@@ -302,8 +386,7 @@ def open_serial_session(
 @mcp.tool()
 def send_serial_text(session_id: str, text: str, seq: int | None = None) -> dict[str, Any]:
     """Send text to a serial session behind the bridge."""
-    data = text.encode("utf-8")
-    data_base64 = base64.b64encode(data).decode("ascii")
+    data_base64, _data = encode_text(text)
     return send_serial_base64(session_id, data_base64, seq)
 
 
@@ -311,25 +394,24 @@ def send_serial_text(session_id: str, text: str, seq: int | None = None) -> dict
 def send_serial_base64(session_id: str, data_base64: str, seq: int | None = None) -> dict[str, Any]:
     """Send base64-encoded bytes to a serial session behind the bridge."""
     try:
-        decoded = base64.b64decode(data_base64, validate=True)
+        decoded = decode_base64(data_base64)
     except ValueError:
         return {"error": "invalid-base64"}
 
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("select id, device_id from serial_sessions where id = %s", (session_id,))
-            session = cur.fetchone()
+            session = find_active_session(cur, session_id)
             if session is None:
-                return {"error": "session-not-found"}
-            cur.execute(
-                """
-                insert into serial_session_logs (session_id, direction, payload_base64, payload_text_preview, byte_count)
-                values (%s, 'tx', %s, %s, %s)
-                returning id, created_at
-                """,
-                (session_id, data_base64, decoded[:120].decode("utf-8", errors="replace"), len(decoded)),
+                return {"error": "active-session-not-found"}
+            log_row = log_serial_payload(
+                cur,
+                session_id,
+                session["device_id"],
+                "tx",
+                data_base64,
+                actor_type="mcp",
+                metadata={"seq": seq},
             )
-            log_row = cur.fetchone()
 
     topic = session_topic(session["device_id"], session_id, "tx")
     publish = publish_mqtt(topic, {"session_id": session_id, "data_base64": data_base64, "seq": seq})
@@ -346,13 +428,29 @@ def close_serial_session(session_id: str, reason: str = "mcp-request") -> dict[s
                 update serial_sessions
                 set state = 'closing', close_reason = %s, updated_at = now()
                 where id = %s
+                  and state in ('opening', 'active')
+                  and exists (
+                    select 1
+                    from devices
+                    where devices.device_id = serial_sessions.device_id
+                      and devices.state = 'claimed'
+                  )
                 returning *
                 """,
                 (reason, session_id),
             )
             session = cur.fetchone()
+            if session is not None:
+                log_serial_event(
+                    cur,
+                    session_id,
+                    session["device_id"],
+                    "session.close_requested",
+                    actor_type="mcp",
+                    metadata={"reason": reason},
+                )
     if session is None:
-        return {"error": "session-not-found"}
+        return {"error": "active-session-not-found"}
 
     topic = session_topic(session["device_id"], session_id, "close")
     publish = publish_mqtt(topic, {"session_id": session_id, "reason": reason})
@@ -367,7 +465,8 @@ def get_session_log(session_id: str, limit: int = 200) -> list[dict[str, Any]]:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                select id, direction, payload_base64, payload_text_preview, byte_count, created_at
+                select id, session_id, device_id, actor_type, actor_id, direction,
+                       payload_base64, payload_text_preview, byte_count, metadata_json, created_at
                 from serial_session_logs
                 where session_id = %s
                 order by created_at desc, id desc
@@ -380,5 +479,6 @@ def get_session_log(session_id: str, limit: int = 200) -> list[dict[str, Any]]:
 
 if __name__ == "__main__":
     open_pool()
+    ensure_mqtt_service_credentials()
     atexit.register(close_pool)
     mcp.run(transport="streamable-http")
