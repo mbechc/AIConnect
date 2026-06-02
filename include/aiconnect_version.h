@@ -1,5 +1,5 @@
 #pragma once
 
-#define AICONNECT_FIRMWARE_VERSION "0.2.2"
+#define AICONNECT_FIRMWARE_VERSION "0.2.3"
 #define AICONNECT_CONTRACT_VERSION "aic/v1"
 #define AICONNECT_HARDWARE_MODEL "m5atom-lite-rs232"

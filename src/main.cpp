@@ -124,6 +124,10 @@ String deviceTopic(const String &suffix) {
   return mqttTopicPrefix + "/devices/" + deviceId + "/" + suffix;
 }
 
+String commandTopic(const String &command) {
+  return mqttTopicPrefix + "/devices/" + deviceId + "/commands/" + command;
+}
+
 String sessionPrefix() {
   return mqttTopicPrefix + "/devices/" + deviceId + "/sessions/";
 }
@@ -241,9 +245,14 @@ void saveClaimStatus(const String &value) {
 }
 
 void wipeDeviceState() {
+  backendConnectionState = "Factory reset requested";
+  claimStatus = "Factory reset requested";
+  ledState = LedState::Reset;
   preferences.begin("aiconnect", false);
   preferences.clear();
   preferences.end();
+  mqttClient.disconnect();
+  WiFi.disconnect(true, true);
   delay(100);
   ESP.restart();
 }
@@ -327,6 +336,20 @@ void publishHeartbeat() {
   if (mqttClient.publish(deviceTopic("heartbeat").c_str(), payload.c_str(), false)) {
     markBackendContact();
   }
+}
+
+void publishFactoryResetAck(const String &reason) {
+  if (!mqttClient.connected()) {
+    return;
+  }
+  JsonDocument doc;
+  doc["device_id"] = deviceId;
+  doc["event"] = "factory_reset_ack";
+  doc["reason"] = reason;
+  doc["uptime_ms"] = millis();
+  String payload;
+  serializeJson(doc, payload);
+  mqttClient.publish(deviceTopic("events").c_str(), payload.c_str(), false);
 }
 
 bool decodeBase64(const String &encoded, uint8_t *out, size_t outSize, size_t &written) {
@@ -427,6 +450,32 @@ void handleSessionMessage(const String &topic, byte *payload, unsigned int lengt
   }
 }
 
+void handleFactoryResetMessage(byte *payload, unsigned int length) {
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, payload, length);
+  if (err) {
+    lastMqttError = "invalid factory reset payload";
+    return;
+  }
+
+  String command = doc["command"].as<String>();
+  String payloadDeviceId = doc["device_id"].as<String>();
+  if (command != "factory_reset") {
+    lastMqttError = "ignored factory reset: invalid command";
+    return;
+  }
+  if (payloadDeviceId != deviceId) {
+    lastMqttError = "ignored factory reset: device_id mismatch";
+    return;
+  }
+
+  String reason = doc["reason"].as<String>();
+  backendConnectionState = "Factory reset requested";
+  publishFactoryResetAck(reason);
+  delay(250);
+  wipeDeviceState();
+}
+
 void mqttCallback(char *topicRaw, byte *payload, unsigned int length) {
   markBackendContact();
   String topic(topicRaw);
@@ -452,6 +501,10 @@ void mqttCallback(char *topicRaw, byte *payload, unsigned int length) {
     return;
   }
   if (mode == Mode::Claimed) {
+    if (topic == commandTopic("factory-reset")) {
+      handleFactoryResetMessage(payload, length);
+      return;
+    }
     handleSessionMessage(topic, payload, length);
   }
 }
@@ -501,6 +554,11 @@ bool connectMqtt(const ControllerEndpoint &endpoint, bool bootstrap) {
     String subscribeTopic = sessionPrefix() + "+/+";
     if (!mqttClient.subscribe(subscribeTopic.c_str(), 1)) {
       lastMqttError = "session subscribe failed";
+      backendConnectionState = "Disconnected from Backend";
+      return false;
+    }
+    if (!mqttClient.subscribe(commandTopic("factory-reset").c_str(), 1)) {
+      lastMqttError = "factory reset subscribe failed";
       backendConnectionState = "Disconnected from Backend";
       return false;
     }
