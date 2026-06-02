@@ -17,7 +17,9 @@ constexpr uint8_t kDnsPort = 53;
 constexpr uint8_t kRs232RxPin = 22;
 constexpr uint8_t kRs232TxPin = 19;
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
-constexpr uint32_t kMqttReconnectMs = 5000;
+constexpr uint32_t kMqttKeepAliveSeconds = 45;
+constexpr uint32_t kMqttReconnectMinMs = 5000;
+constexpr uint32_t kMqttReconnectMaxMs = 60000;
 constexpr uint32_t kHeartbeatMs = 30000;
 constexpr uint32_t kClaimRetryMs = 10000;
 constexpr uint32_t kResetHoldMs = 15000;
@@ -60,13 +62,19 @@ bool mqttTls = true;
 bool claimed = false;
 bool serialOpen = false;
 String activeSessionId;
+String backendConnectionState = "Claim required";
+String lastMqttError = "none";
 uint32_t lastBlinkMs = 0;
 uint32_t lastWifiAttemptMs = 0;
 uint32_t lastMqttAttemptMs = 0;
+uint32_t mqttReconnectDelayMs = kMqttReconnectMinMs;
+uint32_t lastBackendContactMs = 0;
 uint32_t lastHeartbeatMs = 0;
 uint32_t lastClaimPublishMs = 0;
+uint32_t heartbeatSeq = 0;
 uint32_t resetStartedMs = 0;
 bool ledOn = false;
+bool wasMqttConnected = false;
 
 String htmlEscape(const String &value) {
   String escaped;
@@ -118,6 +126,49 @@ String deviceTopic(const String &suffix) {
 
 String sessionPrefix() {
   return mqttTopicPrefix + "/devices/" + deviceId + "/sessions/";
+}
+
+String mqttStateText(int state) {
+  switch (state) {
+    case MQTT_CONNECTION_TIMEOUT: return "connection timeout";
+    case MQTT_CONNECTION_LOST: return "connection lost";
+    case MQTT_CONNECT_FAILED: return "connect failed";
+    case MQTT_DISCONNECTED: return "disconnected";
+    case MQTT_CONNECTED: return "connected";
+    case MQTT_CONNECT_BAD_PROTOCOL: return "bad protocol";
+    case MQTT_CONNECT_BAD_CLIENT_ID: return "bad client id";
+    case MQTT_CONNECT_UNAVAILABLE: return "server unavailable";
+    case MQTT_CONNECT_BAD_CREDENTIALS: return "bad credentials";
+    case MQTT_CONNECT_UNAUTHORIZED: return "unauthorized";
+    default: return "mqtt state " + String(state);
+  }
+}
+
+void markBackendContact() {
+  lastBackendContactMs = millis();
+  lastMqttError = "none";
+  backendConnectionState = "Connected to Backend";
+}
+
+String lastBackendContactText() {
+  if (lastBackendContactMs == 0) {
+    return "never";
+  }
+  uint32_t ageSeconds = (millis() - lastBackendContactMs) / 1000;
+  if (ageSeconds == 0) {
+    return "just now";
+  }
+  return String(ageSeconds) + "s ago";
+}
+
+void refreshMqttConnectionState() {
+  bool connectedNow = mqttClient.connected();
+  if (wasMqttConnected && !connectedNow) {
+    backendConnectionState = "Disconnected from Backend";
+    lastMqttError = mqttStateText(mqttClient.state());
+    ledState = LedState::Offline;
+  }
+  wasMqttConnected = connectedNow;
 }
 
 bool parseController(const String &raw, ControllerEndpoint &endpoint) {
@@ -184,6 +235,9 @@ void saveText(const char *key, const String &value) {
 void saveClaimStatus(const String &value) {
   claimStatus = value;
   saveText("claim_status", value);
+  if (value.startsWith("Rejected:")) {
+    backendConnectionState = "Claim rejected";
+  }
 }
 
 void wipeDeviceState() {
@@ -255,18 +309,24 @@ void publishStatus(const char *state) {
   doc["uptime_ms"] = millis();
   String payload;
   serializeJson(doc, payload);
-  mqttClient.publish(deviceTopic("status").c_str(), payload.c_str(), true);
+  if (mqttClient.publish(deviceTopic("status").c_str(), payload.c_str(), true)) {
+    markBackendContact();
+  }
 }
 
 void publishHeartbeat() {
   JsonDocument doc;
   doc["device_id"] = deviceId;
+  doc["seq"] = ++heartbeatSeq;
   doc["uptime_ms"] = millis();
   doc["wifi_rssi"] = WiFi.RSSI();
-  doc["free_heap"] = ESP.getFreeHeap();
+  doc["firmware_version"] = kFirmwareVersion;
+  doc["state"] = "claimed";
   String payload;
   serializeJson(doc, payload);
-  mqttClient.publish(deviceTopic("heartbeat").c_str(), payload.c_str(), false);
+  if (mqttClient.publish(deviceTopic("heartbeat").c_str(), payload.c_str(), false)) {
+    markBackendContact();
+  }
 }
 
 bool decodeBase64(const String &encoded, uint8_t *out, size_t outSize, size_t &written) {
@@ -298,7 +358,9 @@ void publishSerialRx() {
   String payload;
   serializeJson(doc, payload);
   String topic = sessionPrefix() + activeSessionId + "/rx";
-  mqttClient.publish(topic.c_str(), payload.c_str(), false);
+  if (mqttClient.publish(topic.c_str(), payload.c_str(), false)) {
+    markBackendContact();
+  }
 }
 
 String topicAction(const String &topic, String &sessionId) {
@@ -333,7 +395,9 @@ void handleSessionMessage(const String &topic, byte *payload, unsigned int lengt
     activeSessionId = sessionId;
     serialOpen = true;
     String openedTopic = sessionPrefix() + sessionId + "/opened";
-    mqttClient.publish(openedTopic.c_str(), "{\"status\":\"opened\"}", false);
+    if (mqttClient.publish(openedTopic.c_str(), "{\"status\":\"opened\"}", false)) {
+      markBackendContact();
+    }
     publishStatus("serial-open");
   } else if (action == "tx" && serialOpen && sessionId == activeSessionId) {
     if (err) {
@@ -356,18 +420,22 @@ void handleSessionMessage(const String &topic, byte *payload, unsigned int lengt
     serialOpen = false;
     activeSessionId = "";
     String closedTopic = sessionPrefix() + sessionId + "/closed";
-    mqttClient.publish(closedTopic.c_str(), "{\"status\":\"closed\"}", false);
+    if (mqttClient.publish(closedTopic.c_str(), "{\"status\":\"closed\"}", false)) {
+      markBackendContact();
+    }
     publishStatus("serial-closed");
   }
 }
 
 void mqttCallback(char *topicRaw, byte *payload, unsigned int length) {
+  markBackendContact();
   String topic(topicRaw);
   if (mode == Mode::Setup && topic == claimResponseTopic()) {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload, length);
     if (err) {
       saveClaimStatus("Rejected: invalid claim response");
+      lastMqttError = "invalid claim response";
       ledState = LedState::Error;
       return;
     }
@@ -378,6 +446,7 @@ void mqttCallback(char *topicRaw, byte *payload, unsigned int length) {
       ESP.restart();
     }
     String reason = doc["reason"].as<String>();
+    lastMqttError = reason.length() ? reason : String("claim rejected");
     saveClaimStatus("Rejected: " + (reason.length() ? reason : String("unknown")));
     ledState = LedState::Error;
     return;
@@ -392,14 +461,17 @@ bool connectMqtt(const ControllerEndpoint &endpoint, bool bootstrap) {
     return true;
   }
   uint32_t now = millis();
-  if (lastMqttAttemptMs != 0 && now - lastMqttAttemptMs < kMqttReconnectMs) {
+  if (lastMqttAttemptMs != 0 && now - lastMqttAttemptMs < mqttReconnectDelayMs) {
     return false;
   }
   lastMqttAttemptMs = now;
+  backendConnectionState = "Connecting to Backend";
   configureTls();
   mqttClient.setServer(endpoint.host.c_str(), endpoint.port);
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(1536);
+  mqttClient.setKeepAlive(kMqttKeepAliveSeconds);
+  mqttClient.setSocketTimeout(15);
 
   bool ok = false;
   if (bootstrap) {
@@ -408,15 +480,30 @@ bool connectMqtt(const ControllerEndpoint &endpoint, bool bootstrap) {
     ok = mqttClient.connect(deviceId.c_str(), mqttUsername.c_str(), mqttPassword.c_str());
   }
   if (!ok) {
+    int state = mqttClient.state();
+    lastMqttError = mqttStateText(state);
+    backendConnectionState = "Disconnected from Backend";
+    mqttReconnectDelayMs = min<uint32_t>(mqttReconnectDelayMs * 2, kMqttReconnectMaxMs);
     ledState = LedState::Offline;
     return false;
   }
 
+  wasMqttConnected = true;
+  mqttReconnectDelayMs = kMqttReconnectMinMs;
+  markBackendContact();
   if (bootstrap) {
-    mqttClient.subscribe(claimResponseTopic().c_str(), 1);
+    if (!mqttClient.subscribe(claimResponseTopic().c_str(), 1)) {
+      lastMqttError = "claim response subscribe failed";
+      backendConnectionState = "Disconnected from Backend";
+      return false;
+    }
   } else {
     String subscribeTopic = sessionPrefix() + "+/+";
-    mqttClient.subscribe(subscribeTopic.c_str(), 1);
+    if (!mqttClient.subscribe(subscribeTopic.c_str(), 1)) {
+      lastMqttError = "session subscribe failed";
+      backendConnectionState = "Disconnected from Backend";
+      return false;
+    }
     publishStatus("online");
   }
   ledState = bootstrap ? LedState::Claiming : LedState::Online;
@@ -424,12 +511,23 @@ bool connectMqtt(const ControllerEndpoint &endpoint, bool bootstrap) {
 }
 
 void runClaimLoop() {
-  if (savedController.isEmpty() || savedClaimCode.isEmpty() || WiFi.status() != WL_CONNECTED) {
+  if (savedController.isEmpty()) {
+    backendConnectionState = "Backend not configured";
+    return;
+  }
+  if (savedClaimCode.isEmpty()) {
+    backendConnectionState = "Claim required";
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    backendConnectionState = "Connecting to Backend";
     return;
   }
   ControllerEndpoint endpoint;
   if (!parseController(savedController, endpoint) || !endpoint.tls) {
     saveClaimStatus("Controller must be mqtts://host:port");
+    backendConnectionState = "Backend not configured";
+    lastMqttError = "controller must be mqtts://host:port";
     ledState = LedState::Error;
     return;
   }
@@ -441,8 +539,14 @@ void runClaimLoop() {
   if (lastClaimPublishMs == 0 || now - lastClaimPublishMs >= kClaimRetryMs) {
     lastClaimPublishMs = now;
     String payload = claimPayload();
-    mqttClient.publish(claimRequestTopic().c_str(), payload.c_str(), false);
-    saveClaimStatus("Claim request sent");
+    if (mqttClient.publish(claimRequestTopic().c_str(), payload.c_str(), false)) {
+      markBackendContact();
+      saveClaimStatus("Claim request sent");
+      backendConnectionState = "Connecting to Backend";
+    } else {
+      lastMqttError = "claim request publish failed";
+      backendConnectionState = "Disconnected from Backend";
+    }
   }
 }
 
@@ -450,6 +554,7 @@ void runClaimedLoop() {
   connectWifiIfNeeded();
   if (WiFi.status() != WL_CONNECTED) {
     ledState = LedState::Wifi;
+    backendConnectionState = "Connecting to Backend";
     return;
   }
   ControllerEndpoint endpoint;
@@ -458,6 +563,8 @@ void runClaimedLoop() {
   endpoint.tls = mqttTls;
   endpoint.valid = mqttHost.length() > 0;
   if (!endpoint.valid || !endpoint.tls || mqttUsername.isEmpty() || mqttPassword.isEmpty()) {
+    backendConnectionState = endpoint.valid ? "Claim required" : "Backend not configured";
+    lastMqttError = "missing claimed MQTT settings";
     ledState = LedState::Error;
     return;
   }
@@ -506,6 +613,16 @@ String htmlPage() {
   page += F("<section class='panel' id='serial' hidden><h2>Serial</h2><div class='grid'><div><label>Baud</label><input value='9600' disabled></div><div><label>Mode</label><input value='8N1, no flow control' disabled></div></div></section>");
   page += F("<section class='panel' id='diagnostics' hidden><h2>Diagnostics</h2><div class='status'><div>Device ID: <span class='mono'>");
   page += deviceId;
+  page += F("</span></div><div>Controller: <span class='mono' id='diagController'>");
+  page += htmlEscape(savedController.length() ? savedController : String("not configured"));
+  page += F("</span></div><div>Claim state: <span class='mono' id='diagClaim'>");
+  page += htmlEscape(claimed ? String("claimed") : claimStatus);
+  page += F("</span></div><div>Backend: <span class='mono' id='diagBackend'>");
+  page += htmlEscape(backendConnectionState);
+  page += F("</span></div><div>Last backend contact: <span class='mono' id='diagContact'>");
+  page += lastBackendContactText();
+  page += F("</span></div><div>Last MQTT error: <span class='mono' id='diagError'>");
+  page += htmlEscape(lastMqttError);
   page += F("</span></div><div>Setup SSID: <span class='mono'>");
   page += apSsid;
   page += F("</span></div><div>AP address: <span class='mono'>192.168.4.1</span></div><div>Firmware: <span class='mono'>");
@@ -521,7 +638,8 @@ String htmlPage() {
   page += F("$('#saveWifi').onclick=async()=>{$('#wifiMsg').textContent=await post('/api/wifi/save',{ssid:$('#ssid').value,pass:$('#pass').value});};");
   page += F("$('#saveController').onclick=async()=>{$('#controllerMsg').textContent=await post('/api/controller/save',{controller:$('#controllerHost').value,ca:$('#mqttCa').value});};");
   page += F("$('#saveClaim').onclick=async()=>{const text=await post('/api/claim/save',{claim:$('#claimCode').value});$('#identityMsg').textContent=text;$('#claimStatus').textContent=text;};");
-  page += F("setInterval(async()=>{try{$('#claimStatus').textContent=await fetch('/api/claim/status').then(r=>r.text())}catch(e){}},3000);");
+  page += F("async function refreshDiag(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());$('#claimStatus').textContent=d.claim_state;$('#diagController').textContent=d.controller;$('#diagClaim').textContent=d.claim_state;$('#diagBackend').textContent=d.backend_connection_state;$('#diagContact').textContent=d.last_backend_contact;$('#diagError').textContent=d.last_mqtt_error;}catch(e){}}");
+  page += F("setInterval(refreshDiag,3000);refreshDiag();");
   page += F("</script></body></html>");
   return page;
 }
@@ -603,6 +721,21 @@ void handleClaimStatus() {
   server.send(200, "text/plain", claimStatus);
 }
 
+void handleDiagnostics() {
+  String body = "{";
+  body += "\"device_id\":\"" + jsonEscape(deviceId) + "\",";
+  body += "\"controller\":\"" + jsonEscape(savedController.length() ? savedController : String("not configured")) + "\",";
+  body += "\"claim_state\":\"" + jsonEscape(claimed ? String("claimed") : claimStatus) + "\",";
+  body += "\"backend_connection_state\":\"" + jsonEscape(backendConnectionState) + "\",";
+  body += "\"last_backend_contact\":\"" + jsonEscape(lastBackendContactText()) + "\",";
+  body += "\"last_backend_contact_ms\":" + String(lastBackendContactMs) + ",";
+  body += "\"last_mqtt_error\":\"" + jsonEscape(lastMqttError) + "\",";
+  body += "\"firmware_version\":\"" + String(kFirmwareVersion) + "\",";
+  body += "\"contract_version\":\"" + String(kTopicPrefix) + "\"";
+  body += "}";
+  server.send(200, "application/json", body);
+}
+
 void handleNotFound() {
   server.sendHeader("Location", "http://192.168.4.1/", true);
   server.send(302, "text/plain", "");
@@ -621,6 +754,7 @@ void startSetupAp() {
   server.on("/api/controller/save", HTTP_POST, handleControllerSave);
   server.on("/api/claim/save", HTTP_POST, handleClaimSave);
   server.on("/api/claim/status", HTTP_GET, handleClaimStatus);
+  server.on("/api/diagnostics", HTTP_GET, handleDiagnostics);
   server.onNotFound(handleNotFound);
   server.begin();
   ledState = LedState::Setup;
@@ -693,5 +827,6 @@ void loop() {
     runClaimedLoop();
   }
   mqttClient.loop();
+  refreshMqttConnectionState();
   updateLed();
 }
