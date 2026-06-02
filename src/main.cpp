@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <base64.h>
+#include "aiconnect_version.h"
 #include <mbedtls/base64.h>
 
 namespace {
@@ -20,9 +21,9 @@ constexpr uint32_t kMqttReconnectMs = 5000;
 constexpr uint32_t kHeartbeatMs = 30000;
 constexpr uint32_t kClaimRetryMs = 10000;
 constexpr uint32_t kResetHoldMs = 15000;
-constexpr const char *kTopicPrefix = "aic/v1";
-constexpr const char *kFirmwareVersion = "0.2.0";
-constexpr const char *kHardwareModel = "m5atom-lite-rs232";
+constexpr const char *kTopicPrefix = AICONNECT_CONTRACT_VERSION;
+constexpr const char *kFirmwareVersion = AICONNECT_FIRMWARE_VERSION;
+constexpr const char *kHardwareModel = AICONNECT_HARDWARE_MODEL;
 
 enum class Mode { Setup, Claimed };
 enum class LedState { Setup, Wifi, Claiming, Online, Offline, Error, Reset };
@@ -486,7 +487,9 @@ String htmlPage() {
   page += F("textarea{min-height:160px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}button{border:0;border-radius:8px;background:var(--accent);color:#03110e;font-weight:700;padding:12px 14px;font-size:15px;cursor:pointer}.secondary{background:#22303a;color:var(--text)}");
   page += F(".actions{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}.status{margin-top:18px;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);line-height:1.55}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--blue);overflow-wrap:anywhere}.msg{min-height:24px;margin-top:14px;color:var(--accent)}");
   page += F("@media(max-width:720px){.top{display:block}.pill{display:inline-block;margin-top:12px}.layout{grid-template-columns:1fr}.nav{border-right:0;border-bottom:1px solid var(--line);padding:0 0 12px}.grid{grid-template-columns:1fr}}");
-  page += F("</style></head><body><main><div class='top'><div><h1>AI Connect</h1><div class='sub'>Field console bridge setup</div></div><div class='pill'>Setup AP Active</div></div>");
+  page += F("</style></head><body><main><div class='top'><div><h1>AI Connect</h1><div class='sub'>Field console bridge setup</div></div><div class='pill'>Firmware ");
+  page += kFirmwareVersion;
+  page += F("</div></div>");
   page += F("<div class='layout'><aside class='nav'><button class='active' data-tab='wireless'>Settings / Wireless</button><button data-tab='controller'>Controller</button><button data-tab='identity'>Identity</button><button data-tab='serial'>Serial</button><button data-tab='diagnostics'>Diagnostics</button></aside>");
   page += F("<section class='panel' id='wireless'><h2>Wireless</h2><div class='grid'><div><label>Wi-Fi SSID</label><select id='ssid'><option value=''>Scan to choose network</option></select></div><div><label>Wi-Fi Password</label><input id='pass' type='password' placeholder='Password'></div></div>");
   page += F("<div class='actions'><button id='scan'>Scan</button><button id='saveWifi'>Save Wi-Fi</button><button class='secondary' onclick='location.reload()'>Refresh</button></div><div class='msg' id='wifiMsg'></div><div class='status'>Saved SSID: <span class='mono'>");
@@ -507,6 +510,10 @@ String htmlPage() {
   page += apSsid;
   page += F("</span></div><div>AP address: <span class='mono'>192.168.4.1</span></div><div>Firmware: <span class='mono'>");
   page += kFirmwareVersion;
+  page += F("</span></div><div>Contract: <span class='mono'>");
+  page += kTopicPrefix;
+  page += F("</span></div><div>Hardware: <span class='mono'>");
+  page += kHardwareModel;
   page += F("</span></div></div></section></div></main><script>");
   page += F("const $=s=>document.querySelector(s);document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.nav button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.panel').forEach(p=>p.hidden=true);b.classList.add('active');$('#'+b.dataset.tab).hidden=false;});");
   page += F("async function post(url,data){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(data)});return r.text();}");
