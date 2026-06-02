@@ -1,8 +1,14 @@
 # AI Connect
 
-AI Connect turns an M5Atom Lite RS232 device into a secure remote console bridge for equipment that is difficult, slow, or risky to reach physically. The intent is to give an operator controlled serial access through a backend they manage, without making the field device responsible for deciding who owns it or which organisation it belongs to.
+AI Connect lets an AI assistant help troubleshoot physical devices that are hard to reach, poorly documented, or sitting beside people who are not trained to diagnose them. A common target is infrastructure such as Cisco routers, switches, firewalls, or other serial-console equipment in remote closets, vehicles, factories, customer sites, or temporary locations.
 
-Security is the centre of the design. A backend may serve multiple organisations, so device ownership, MQTT permissions, claim codes, and serial sessions must all be scoped by backend-controlled identity and state. A MAC address or eFuse value can identify hardware, but it is not treated as a secret and must not grant ownership by itself.
+The field person should not need to know console commands, baud rates, log interpretation, or escalation routines. They should be able to plug in a small bridge, get it online, and let a skilled operator or AI assistant guide the troubleshooting session through a controlled backend.
+
+AI Connect turns an M5Atom Lite RS232 device into a secure remote console bridge for that job. The intent is to give an AI-capable operations layer controlled serial access through a backend the owner manages, without making the field device responsible for deciding who owns it or which organisation it belongs to.
+
+Security is the centre of the design. A backend may serve multiple organisations, so device ownership, MQTT permissions, claim codes, MCP tools, and serial sessions must all be scoped by backend-controlled identity and state. A MAC address or eFuse value can identify hardware, but it is not treated as a secret and must not grant ownership by itself.
+
+The REST API is the stable control plane, but the preferred operational frontend is MCP. A strong MCP surface lets an AI assistant set up organisations and sites, create onboarding codes, check health, inspect device presence, open serial sessions, and communicate ad hoc with the actual device behind the bridge.
 
 Devices start unclaimed. An authenticated backend operator creates a short-lived, one-time claim code for the correct organisation/site. The operator enters that code in the device setup UI. The device then publishes a claim request over MQTT with its device identity and the claim code. If the backend accepts the claim, it binds the device to the selected site, marks the code used, and returns per-device MQTT credentials.
 
@@ -115,6 +121,21 @@ The backend README has service-level details, API routes, and manual claim verif
 ```text
 backend/README.md
 ```
+
+The backend also runs an MCP server side-by-side with the REST API:
+
+```text
+http://127.0.0.1:8001/mcp
+```
+
+MCP tools currently cover:
+
+- platform health summary
+- organization creation and listing
+- site creation and listing
+- claim-code creation and listing
+- device listing, presence, and disable actions
+- serial session open, transmit, close, and log inspection
 
 Current contract constants:
 

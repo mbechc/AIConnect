@@ -32,6 +32,19 @@ services:
       timeout: 5s
       retries: 10
 
+  mcp:
+    build: ./api
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_started
+    command: ["python", "-m", "app.mcp_server"]
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8001}:8001"
+
   emqx:
     image: emqx/emqx:5.8.6
     restart: unless-stopped

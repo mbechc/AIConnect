@@ -5,6 +5,7 @@ Self-hosted controller PoC for M5Atom Lite RS232 console bridges.
 ## Services
 
 - `api`: FastAPI controller API
+- `mcp`: Model Context Protocol server for AI-assisted operations
 - `postgres`: persistent registry, claim, session, and audit storage
 - `emqx`: MQTT broker, prepared for TLS on `8883`
 - `caddy`: HTTPS reverse proxy for the API
@@ -31,11 +32,29 @@ Public API should be served by Caddy at:
 https://mqtts.itego.dk
 ```
 
+Local MCP endpoint:
+
+```text
+http://127.0.0.1:8001/mcp
+```
+
 MQTT TLS endpoint:
 
 ```text
 mqtts://mqtts.itego.dk:8883
 ```
+
+## MCP Operations
+
+The MCP server is intended to be the AI-facing operational frontend. It runs side-by-side with the API and exposes tools for:
+
+- initial platform summary
+- organization and site configuration
+- claim-code creation for device onboarding
+- device health and presence checks
+- serial session open, transmit, close, and log inspection
+
+The REST API remains the stable control plane. MCP tools should preserve the same tenant, claim, device-state, and MQTT topic contracts as the API.
 
 ## Topic Prefix
 
