@@ -57,12 +57,14 @@ String mqttHost;
 String mqttUsername;
 String mqttPassword;
 String mqttTopicPrefix = kTopicPrefix;
+String mqttStatusTopic;
+String mqttHeartbeatTopic;
 uint16_t mqttPort = 8883;
 bool mqttTls = true;
 bool claimed = false;
 bool serialOpen = false;
 String activeSessionId;
-String backendConnectionState = "Claim required";
+String backendConnectionState = "Backend not configured";
 String lastMqttError = "none";
 uint32_t lastBlinkMs = 0;
 uint32_t lastWifiAttemptMs = 0;
@@ -151,7 +153,7 @@ String mqttStateText(int state) {
 void markBackendContact() {
   lastBackendContactMs = millis();
   lastMqttError = "none";
-  backendConnectionState = "Connected to Backend";
+  backendConnectionState = mode == Mode::Claimed ? "Claimed, connected" : "Provisioning connection active";
 }
 
 String lastBackendContactText() {
@@ -187,6 +189,10 @@ void refreshMqttConnectionState() {
     ledState = LedState::Offline;
   }
   wasMqttConnected = connectedNow;
+}
+
+bool isMqttAuthFailure(int state) {
+  return state == MQTT_CONNECT_BAD_CREDENTIALS || state == MQTT_CONNECT_UNAUTHORIZED;
 }
 
 bool parseController(const String &raw, ControllerEndpoint &endpoint) {
@@ -241,6 +247,8 @@ void loadConfig() {
   mqttUsername = preferences.getString("mqtt_user", "");
   mqttPassword = preferences.getString("mqtt_pass", "");
   mqttTopicPrefix = preferences.getString("topic_prefix", kTopicPrefix);
+  mqttStatusTopic = preferences.getString("status_topic", "");
+  mqttHeartbeatTopic = preferences.getString("heartbeat_topic", "");
   preferences.end();
 }
 
@@ -294,6 +302,9 @@ void configureTls() {
 
 void saveAcceptedClaim(JsonDocument &doc) {
   JsonObject mqtt = doc["mqtt"];
+  const char *topicPrefix = mqtt["topic_prefix"].as<const char *>();
+  const char *statusTopic = mqtt["status_topic"].as<const char *>();
+  const char *heartbeatTopic = mqtt["heartbeat_topic"].as<const char *>();
   preferences.begin("aiconnect", false);
   preferences.putBool("claimed", true);
   preferences.putString("claim_status", "Accepted");
@@ -302,7 +313,9 @@ void saveAcceptedClaim(JsonDocument &doc) {
   preferences.putBool("mqtt_tls", mqtt["tls"].as<bool>());
   preferences.putString("mqtt_user", mqtt["username"].as<const char *>());
   preferences.putString("mqtt_pass", mqtt["password"].as<const char *>());
-  preferences.putString("topic_prefix", mqtt["topic_prefix"].as<const char *>());
+  preferences.putString("topic_prefix", topicPrefix ? topicPrefix : kTopicPrefix);
+  preferences.putString("status_topic", statusTopic ? statusTopic : "");
+  preferences.putString("heartbeat_topic", heartbeatTopic ? heartbeatTopic : "");
   preferences.remove("claim_code");
   preferences.end();
 }
@@ -332,7 +345,8 @@ void publishStatus(const char *state) {
   doc["uptime_ms"] = millis();
   String payload;
   serializeJson(doc, payload);
-  if (mqttClient.publish(deviceTopic("status").c_str(), payload.c_str(), true)) {
+  String topic = mqttStatusTopic.length() ? mqttStatusTopic : deviceTopic("status");
+  if (mqttClient.publish(topic.c_str(), payload.c_str(), true)) {
     markBackendContact();
   }
 }
@@ -347,7 +361,8 @@ void publishHeartbeat() {
   doc["state"] = "claimed";
   String payload;
   serializeJson(doc, payload);
-  if (mqttClient.publish(deviceTopic("heartbeat").c_str(), payload.c_str(), false)) {
+  String topic = mqttHeartbeatTopic.length() ? mqttHeartbeatTopic : deviceTopic("heartbeat");
+  if (mqttClient.publish(topic.c_str(), payload.c_str(), false)) {
     markBackendContact();
   }
 }
@@ -532,7 +547,7 @@ bool connectMqtt(const ControllerEndpoint &endpoint, bool bootstrap) {
     return false;
   }
   lastMqttAttemptMs = now;
-  backendConnectionState = "Connecting to Backend";
+  backendConnectionState = bootstrap ? "Claim pending" : "Claimed, connecting";
   configureTls();
   mqttClient.setServer(endpoint.host.c_str(), endpoint.port);
   mqttClient.setCallback(mqttCallback);
@@ -542,14 +557,15 @@ bool connectMqtt(const ControllerEndpoint &endpoint, bool bootstrap) {
 
   bool ok = false;
   if (bootstrap) {
-    ok = mqttClient.connect(deviceId.c_str());
+    ok = mqttClient.connect(deviceId.c_str(), AICONNECT_PROVISIONING_USERNAME,
+                            AICONNECT_PROVISIONING_PASSWORD);
   } else {
     ok = mqttClient.connect(deviceId.c_str(), mqttUsername.c_str(), mqttPassword.c_str());
   }
   if (!ok) {
     int state = mqttClient.state();
     lastMqttError = mqttStateText(state);
-    backendConnectionState = "Disconnected from Backend";
+    backendConnectionState = isMqttAuthFailure(state) ? "Authentication failed" : "Disconnected from Backend";
     mqttReconnectDelayMs = min<uint32_t>(mqttReconnectDelayMs * 2, kMqttReconnectMaxMs);
     ledState = LedState::Offline;
     return false;
@@ -588,11 +604,11 @@ void runClaimLoop() {
     return;
   }
   if (savedClaimCode.isEmpty()) {
-    backendConnectionState = "Claim required";
+    backendConnectionState = "Claim pending";
     return;
   }
   if (WiFi.status() != WL_CONNECTED) {
-    backendConnectionState = "Connecting to Backend";
+    backendConnectionState = "Claim pending";
     return;
   }
   ControllerEndpoint endpoint;
@@ -614,7 +630,7 @@ void runClaimLoop() {
     if (mqttClient.publish(claimRequestTopic().c_str(), payload.c_str(), false)) {
       markBackendContact();
       saveClaimStatus("Claim request sent");
-      backendConnectionState = "Connecting to Backend";
+      backendConnectionState = "Claim pending";
     } else {
       lastMqttError = "claim request publish failed";
       backendConnectionState = "Disconnected from Backend";
@@ -626,7 +642,7 @@ void runClaimedLoop() {
   connectWifiIfNeeded();
   if (WiFi.status() != WL_CONNECTED) {
     ledState = LedState::Wifi;
-    backendConnectionState = "Connecting to Backend";
+    backendConnectionState = "Claimed, connecting";
     return;
   }
   ControllerEndpoint endpoint;
@@ -635,7 +651,7 @@ void runClaimedLoop() {
   endpoint.tls = mqttTls;
   endpoint.valid = mqttHost.length() > 0;
   if (!endpoint.valid || !endpoint.tls || mqttUsername.isEmpty() || mqttPassword.isEmpty()) {
-    backendConnectionState = endpoint.valid ? "Claim required" : "Backend not configured";
+    backendConnectionState = endpoint.valid ? "Authentication failed" : "Backend not configured";
     lastMqttError = "missing claimed MQTT settings";
     ledState = LedState::Error;
     return;
@@ -750,7 +766,7 @@ String claimedStatusPage() {
   page += F("</div></div><div class='item'><div class='label'>Heartbeat sequence</div><div class='value' id='seq'>");
   page += heartbeatSeq;
   page += F("</div></div></div></section><script>");
-  page += F("async function refresh(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());const s=document.getElementById('state');s.textContent=d.backend_connection_state;s.className='state '+(d.backend_connection_state==='Connected to Backend'?'ok':(d.backend_connection_state==='Connecting to Backend'?'warn':'bad'));document.getElementById('controller').textContent=d.controller;document.getElementById('localIp').textContent=d.local_ip;document.getElementById('lastSync').textContent=d.last_backend_contact;document.getElementById('mqttError').textContent=d.last_mqtt_error;document.getElementById('seq').textContent=d.heartbeat_seq;}catch(e){}}setInterval(refresh,3000);refresh();");
+  page += F("async function refresh(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());const s=document.getElementById('state');s.textContent=d.backend_connection_state;s.className='state '+(d.backend_connection_state==='Claimed, connected'?'ok':(d.backend_connection_state==='Claimed, connecting'?'warn':'bad'));document.getElementById('controller').textContent=d.controller;document.getElementById('localIp').textContent=d.local_ip;document.getElementById('lastSync').textContent=d.last_backend_contact;document.getElementById('mqttError').textContent=d.last_mqtt_error;document.getElementById('seq').textContent=d.heartbeat_seq;}catch(e){}}setInterval(refresh,3000);refresh();");
   page += F("</script></main></body></html>");
   return page;
 }
