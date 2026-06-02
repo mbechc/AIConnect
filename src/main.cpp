@@ -22,6 +22,7 @@ constexpr uint32_t kMqttReconnectMinMs = 5000;
 constexpr uint32_t kMqttReconnectMaxMs = 60000;
 constexpr uint32_t kHeartbeatMs = 30000;
 constexpr uint32_t kClaimRetryMs = 10000;
+constexpr uint32_t kClaimCodeTtlMs = 20UL * 60UL * 1000UL;
 constexpr uint32_t kResetHoldMs = 15000;
 constexpr const char *kTopicPrefix = AICONNECT_CONTRACT_VERSION;
 constexpr const char *kFirmwareVersion = AICONNECT_FIRMWARE_VERSION;
@@ -115,11 +116,11 @@ String buildDeviceId() {
 }
 
 String claimResponseTopic() {
-  return String(kTopicPrefix) + "/claim/response/" + deviceId;
+  return String(kTopicPrefix) + "/onboarding/response/" + deviceId;
 }
 
 String claimRequestTopic() {
-  return String(kTopicPrefix) + "/claim/request";
+  return String(kTopicPrefix) + "/onboarding/register";
 }
 
 String deviceTopic(const String &suffix) {
@@ -252,6 +253,59 @@ void loadConfig() {
   preferences.end();
 }
 
+String generateClaimCode() {
+  static constexpr char alphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  String code;
+  code.reserve(9);
+  for (uint8_t i = 0; i < 8; i++) {
+    if (i == 4) {
+      code += '-';
+    }
+    code += alphabet[esp_random() % (sizeof(alphabet) - 1)];
+  }
+  return code;
+}
+
+void persistClaimCode(const String &code, const String &status) {
+  savedClaimCode = code;
+  claimStatus = status;
+  preferences.begin("aiconnect", false);
+  preferences.putString("claim_code", savedClaimCode);
+  preferences.putULong("claim_code_started_ms", millis());
+  preferences.putString("claim_status", claimStatus);
+  preferences.end();
+}
+
+void ensureClaimCode() {
+  if (claimed) {
+    return;
+  }
+  if (savedClaimCode.isEmpty()) {
+    persistClaimCode(generateClaimCode(), "Claim code generated");
+  }
+}
+
+void refreshClaimCodeExpiry() {
+  if (claimed || savedClaimCode.isEmpty()) {
+    return;
+  }
+  preferences.begin("aiconnect", true);
+  uint32_t startedMs = preferences.getULong("claim_code_started_ms", 0);
+  preferences.end();
+  if (startedMs == 0) {
+    persistClaimCode(savedClaimCode, claimStatus.length() ? claimStatus : String("Claim code generated"));
+    return;
+  }
+  if (millis() < startedMs) {
+    persistClaimCode(savedClaimCode, claimStatus.length() ? claimStatus : String("Claim code generated"));
+    return;
+  }
+  if (millis() - startedMs >= kClaimCodeTtlMs) {
+    persistClaimCode(generateClaimCode(), "Claim code regenerated after expiry");
+    lastClaimPublishMs = 0;
+  }
+}
+
 void saveText(const char *key, const String &value) {
   preferences.begin("aiconnect", false);
   preferences.putString(key, value);
@@ -302,6 +356,7 @@ void configureTls() {
 
 void saveAcceptedClaim(JsonDocument &doc) {
   JsonObject mqtt = doc["mqtt"];
+  String responseDeviceId = doc["device_id"].as<String>();
   const char *topicPrefix = mqtt["topic_prefix"].as<const char *>();
   const char *statusTopic = mqtt["status_topic"].as<const char *>();
   const char *heartbeatTopic = mqtt["heartbeat_topic"].as<const char *>();
@@ -318,6 +373,27 @@ void saveAcceptedClaim(JsonDocument &doc) {
   preferences.putString("heartbeat_topic", heartbeatTopic ? heartbeatTopic : "");
   preferences.remove("claim_code");
   preferences.end();
+}
+
+bool validAcceptedClaim(JsonDocument &doc, String &reason) {
+  String status = doc["status"].as<String>();
+  if (status != "accepted") {
+    reason = "status not accepted";
+    return false;
+  }
+  String responseDeviceId = doc["device_id"].as<String>();
+  if (responseDeviceId != deviceId) {
+    reason = "device_id mismatch";
+    return false;
+  }
+  JsonObject mqtt = doc["mqtt"];
+  if (mqtt.isNull() || mqtt["host"].isNull() || mqtt["port"].isNull() ||
+      mqtt["username"].isNull() || mqtt["password"].isNull() ||
+      mqtt["topic_prefix"].isNull()) {
+    reason = "accepted response missing MQTT settings";
+    return false;
+  }
+  return true;
 }
 
 String claimPayload() {
@@ -518,7 +594,19 @@ void mqttCallback(char *topicRaw, byte *payload, unsigned int length) {
       return;
     }
     String status = doc["status"].as<String>();
+    String responseDeviceId = doc["device_id"].as<String>();
+    if (!responseDeviceId.isEmpty() && responseDeviceId != deviceId) {
+      lastMqttError = "ignored onboarding response: device_id mismatch";
+      return;
+    }
     if (status == "accepted") {
+      String reason;
+      if (!validAcceptedClaim(doc, reason)) {
+        lastMqttError = reason;
+        saveClaimStatus("Rejected: " + reason);
+        ledState = LedState::Error;
+        return;
+      }
       saveAcceptedClaim(doc);
       delay(250);
       ESP.restart();
@@ -599,6 +687,8 @@ bool connectMqtt(const ControllerEndpoint &endpoint, bool bootstrap) {
 }
 
 void runClaimLoop() {
+  refreshClaimCodeExpiry();
+  ensureClaimCode();
   if (savedController.isEmpty()) {
     backendConnectionState = "Backend not configured";
     return;
@@ -629,7 +719,7 @@ void runClaimLoop() {
     String payload = claimPayload();
     if (mqttClient.publish(claimRequestTopic().c_str(), payload.c_str(), false)) {
       markBackendContact();
-      saveClaimStatus("Claim request sent");
+      saveClaimStatus("Pending onboarding registration sent");
       backendConnectionState = "Claim pending";
     } else {
       lastMqttError = "claim request publish failed";
@@ -695,7 +785,9 @@ String htmlPage() {
   page += F("'><label style='margin-top:14px'>MQTT CA PEM</label><textarea id='mqttCa' placeholder='Paste CA certificate PEM for production TLS validation'>");
   page += htmlEscape(savedCaPem);
   page += F("</textarea><div class='actions'><button id='saveController'>Save Controller</button></div><div class='msg' id='controllerMsg'></div></section>");
-  page += F("<section class='panel' id='identity' hidden><h2>Identity</h2><label>Claim Code</label><input id='claimCode' placeholder='Claim code'><div class='actions'><button id='saveClaim'>Save Claim Code</button></div><div class='msg' id='identityMsg'></div><div class='status'>Claim status: <span class='mono' id='claimStatus'>");
+  page += F("<section class='panel' id='identity' hidden><h2>Identity</h2><div class='status' style='border-top:0;padding-top:0'>Enter this claim code in the AI Connect backend and assign the bridge to the correct organisation/site there.</div><label>Claim Code</label><div class='value mono' style='font-size:28px;margin:8px 0 12px' id='claimCode'>");
+  page += htmlEscape(savedClaimCode.length() ? savedClaimCode : String("generating"));
+  page += F("</div><div class='msg' id='identityMsg'></div><div class='status'>Claim status: <span class='mono' id='claimStatus'>");
   page += htmlEscape(claimStatus);
   page += F("</span></div></section>");
   page += F("<section class='panel' id='serial' hidden><h2>Serial</h2><div class='grid'><div><label>Baud</label><input value='9600' disabled></div><div><label>Mode</label><input value='8N1, no flow control' disabled></div></div></section>");
@@ -725,8 +817,7 @@ String htmlPage() {
   page += F("$('#scan').onclick=async()=>{const m=$('#wifiMsg');m.textContent='Scanning...';const nets=await fetch('/api/wifi/scan').then(r=>r.json());const s=$('#ssid');s.innerHTML='<option value=\"\">Choose network</option>';nets.forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+' dBm)';s.appendChild(o)});m.textContent=nets.length?'Select a network and save.':'No networks found.'};");
   page += F("$('#saveWifi').onclick=async()=>{$('#wifiMsg').textContent=await post('/api/wifi/save',{ssid:$('#ssid').value,pass:$('#pass').value});};");
   page += F("$('#saveController').onclick=async()=>{$('#controllerMsg').textContent=await post('/api/controller/save',{controller:$('#controllerHost').value,ca:$('#mqttCa').value});};");
-  page += F("$('#saveClaim').onclick=async()=>{const text=await post('/api/claim/save',{claim:$('#claimCode').value});$('#identityMsg').textContent=text;$('#claimStatus').textContent=text;};");
-  page += F("async function refreshDiag(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());$('#claimStatus').textContent=d.claim_state;$('#diagController').textContent=d.controller;$('#diagClaim').textContent=d.claim_state;$('#diagBackend').textContent=d.backend_connection_state;$('#diagContact').textContent=d.last_backend_contact;$('#diagError').textContent=d.last_mqtt_error;}catch(e){}}");
+  page += F("async function refreshDiag(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());$('#claimStatus').textContent=d.claim_state;$('#claimCode').textContent=d.claim_code||'generating';$('#diagController').textContent=d.controller;$('#diagClaim').textContent=d.claim_state;$('#diagBackend').textContent=d.backend_connection_state;$('#diagContact').textContent=d.last_backend_contact;$('#diagError').textContent=d.last_mqtt_error;}catch(e){}}");
   page += F("setInterval(refreshDiag,3000);refreshDiag();");
   page += F("</script></body></html>");
   return page;
@@ -853,6 +944,7 @@ void handleDiagnostics() {
   body += "\"device_id\":\"" + jsonEscape(deviceId) + "\",";
   body += "\"controller\":\"" + jsonEscape(controllerDisplay()) + "\",";
   body += "\"claim_state\":\"" + jsonEscape(claimed ? String("claimed") : claimStatus) + "\",";
+  body += "\"claim_code\":\"" + jsonEscape(claimed ? String("") : savedClaimCode) + "\",";
   body += "\"backend_connection_state\":\"" + jsonEscape(backendConnectionState) + "\",";
   body += "\"last_backend_contact\":\"" + jsonEscape(lastBackendContactText()) + "\",";
   body += "\"last_backend_contact_ms\":" + String(lastBackendContactMs) + ",";
@@ -886,7 +978,6 @@ void startSetupAp() {
   server.on("/api/wifi/scan", HTTP_GET, handleWifiScan);
   server.on("/api/wifi/save", HTTP_POST, handleWifiSave);
   server.on("/api/controller/save", HTTP_POST, handleControllerSave);
-  server.on("/api/claim/save", HTTP_POST, handleClaimSave);
   server.on("/api/claim/status", HTTP_GET, handleClaimStatus);
   server.on("/api/diagnostics", HTTP_GET, handleDiagnostics);
   server.onNotFound(handleNotFound);
@@ -949,6 +1040,7 @@ void setup() {
   loadConfig();
   mode = claimed ? Mode::Claimed : Mode::Setup;
   if (mode == Mode::Setup) {
+    ensureClaimCode();
     startSetupAp();
   } else {
     startClaimedMode();
