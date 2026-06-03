@@ -325,6 +325,9 @@ void refreshClaimCodeExpiry() {
   if (claimed || savedClaimCode.isEmpty()) {
     return;
   }
+  if (claimCodeRegistered) {
+    return;
+  }
   preferences.begin("aiconnect", true);
   uint32_t startedMs = preferences.getULong("claim_code_started_ms", 0);
   preferences.end();
@@ -333,7 +336,9 @@ void refreshClaimCodeExpiry() {
     return;
   }
   if (millis() < startedMs) {
-    persistClaimCode(savedClaimCode, claimStatus.length() ? claimStatus : String("Waiting for backend registration"));
+    preferences.begin("aiconnect", false);
+    preferences.putULong("claim_code_started_ms", millis());
+    preferences.end();
     return;
   }
   if (millis() - startedMs >= kClaimCodeTtlMs) {
@@ -673,7 +678,7 @@ bool connectMqtt(const ControllerEndpoint &endpoint, bool bootstrap) {
     return false;
   }
   lastMqttAttemptMs = now;
-  backendConnectionState = bootstrap ? "Claim pending" : "Claimed, connecting";
+  backendConnectionState = bootstrap ? "Waiting for backend registration" : "Claimed, connecting";
   configureTls();
   mqttClient.setServer(endpoint.host.c_str(), endpoint.port);
   mqttClient.setCallback(mqttCallback);
@@ -732,11 +737,11 @@ void runClaimLoop() {
     return;
   }
   if (savedClaimCode.isEmpty()) {
-    backendConnectionState = "Claim pending";
+    backendConnectionState = "Waiting for backend registration";
     return;
   }
   if (WiFi.status() != WL_CONNECTED) {
-    backendConnectionState = "Claim pending";
+    backendConnectionState = "Waiting for backend registration";
     return;
   }
   ControllerEndpoint endpoint;
@@ -758,7 +763,7 @@ void runClaimLoop() {
     if (mqttClient.publish(claimRequestTopic().c_str(), payload.c_str(), false)) {
       markBackendContact();
       markClaimCodeRegistered();
-      backendConnectionState = "Claim pending";
+      backendConnectionState = "Ready for operator claim";
     } else {
       lastMqttError = "claim request publish failed";
       backendConnectionState = "Disconnected from Backend";
@@ -835,9 +840,11 @@ String htmlPage() {
   page += htmlEscape(savedController.length() ? savedController : String("not configured"));
   page += F("</span></div><div>Claim state: <span class='mono' id='diagClaim'>");
   page += htmlEscape(claimed ? String("claimed") : claimStatus);
+  page += F("</span></div><div>Claim code: <span class='mono' id='diagClaimCode'>");
+  page += htmlEscape(setupClaimCodeDisplay());
   page += F("</span></div><div>Backend: <span class='mono' id='diagBackend'>");
   page += htmlEscape(backendConnectionState);
-  page += F("</span></div><div>Last backend contact: <span class='mono' id='diagContact'>");
+  page += F("</span></div><div>Last successful backend contact: <span class='mono' id='diagContact'>");
   page += lastBackendContactText();
   page += F("</span></div><div>Last MQTT error: <span class='mono' id='diagError'>");
   page += htmlEscape(lastMqttError);
@@ -855,7 +862,7 @@ String htmlPage() {
   page += F("$('#scan').onclick=async()=>{const m=$('#wifiMsg');m.textContent='Scanning...';const nets=await fetch('/api/wifi/scan').then(r=>r.json());const s=$('#ssid');s.innerHTML='<option value=\"\">Choose network</option>';nets.forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+' dBm)';s.appendChild(o)});m.textContent=nets.length?'Select a network and save.':'No networks found.'};");
   page += F("$('#saveWifi').onclick=async()=>{$('#wifiMsg').textContent=await post('/api/wifi/save',{ssid:$('#ssid').value,pass:$('#pass').value});};");
   page += F("$('#saveController').onclick=async()=>{$('#controllerMsg').textContent=await post('/api/controller/save',{controller:$('#controllerHost').value,ca:$('#mqttCa').value});};");
-  page += F("async function refreshDiag(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());$('#claimStatus').textContent=d.claim_state;$('#claimCode').textContent=d.claim_code||'Waiting for backend registration';$('#diagController').textContent=d.controller;$('#diagClaim').textContent=d.claim_state;$('#diagBackend').textContent=d.backend_connection_state;$('#diagContact').textContent=d.last_backend_contact;$('#diagError').textContent=d.last_mqtt_error;}catch(e){}}");
+  page += F("async function refreshDiag(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());const c=d.claim_code||'Waiting for backend registration';$('#claimStatus').textContent=d.claim_state;$('#claimCode').textContent=c;$('#diagClaimCode').textContent=c;$('#diagController').textContent=d.controller;$('#diagClaim').textContent=d.claim_state;$('#diagBackend').textContent=d.backend_connection_state;$('#diagContact').textContent=d.last_backend_contact;$('#diagError').textContent=d.last_mqtt_error;}catch(e){}}");
   page += F("setInterval(refreshDiag,3000);refreshDiag();");
   page += F("</script></body></html>");
   return page;
@@ -886,7 +893,7 @@ String claimedStatusPage() {
   page += htmlEscape(controllerDisplay());
   page += F("</div></div><div class='item'><div class='label'>Local IP</div><div class='value' id='localIp'>");
   page += localIpText();
-  page += F("</div></div><div class='item'><div class='label'>Last sync</div><div class='value' id='lastSync'>");
+  page += F("</div></div><div class='item'><div class='label'>Last successful backend contact</div><div class='value' id='lastSync'>");
   page += lastBackendContactText();
   page += F("</div></div><div class='item'><div class='label'>Last MQTT error</div><div class='value' id='mqttError'>");
   page += htmlEscape(lastMqttError);

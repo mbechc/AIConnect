@@ -90,6 +90,21 @@ At that point the operator can copy the claim code from the Bridge UI into the b
 
 If the Bridge is already claimed, the setup claim-code UI is not available. Claimed mode exposes only the status page and must not display `generating` or a stale claim code.
 
+## Operator Visible States
+
+The Bridge setup UI uses these meanings consistently across Identity and Diagnostics.
+
+| UI state | Meaning | Claim code visible |
+| --- | --- | --- |
+| `Backend not configured` | No controller endpoint has been saved. | No |
+| `Waiting for backend registration` | The Bridge is unclaimed, but it has not yet successfully published `aic/v1/onboarding/register`. | No |
+| `Authentication failed` | The onboarding MQTT connection was rejected by the broker. Check the compiled provisioning username/password and reflash if needed. | No |
+| `Ready for operator claim` | The Bridge successfully authenticated, published the pending onboarding registration, and the backend should have the pending claim code. | Yes |
+| `Claim rejected` | The backend rejected the onboarding response. The Bridge remains unclaimed and keeps Wi-Fi/controller settings for troubleshooting. | No |
+| `claimed` | The backend accepted the claim and issued per-device MQTT credentials. | No |
+
+`Last successful backend contact` is deliberately narrow: it updates only after a successful MQTT connect, publish, or received message. Failed authentication attempts, Wi-Fi setup, local AP access, and local web UI refreshes do not count as backend contact.
+
 ## Pending Registration
 
 The Bridge publishes a pending onboarding registration:
