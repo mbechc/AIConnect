@@ -23,6 +23,29 @@ The Bridge must not include organisation or site fields in onboarding payloads.
 
 Before claim, the Bridge connects to the backend onboarding MQTT endpoint with a restricted provisioning credential configured for the deployment.
 
+The provisioning username/password is burned into the compiled ESP32 firmware image. Before compiling firmware, create:
+
+```text
+include/aiconnect_secrets.h
+```
+
+Use the committed template:
+
+```text
+include/aiconnect_secrets.example.h
+```
+
+Example local secrets file:
+
+```cpp
+#pragma once
+
+#define AICONNECT_PROVISIONING_USERNAME "aiconnect-provisioning"
+#define AICONNECT_PROVISIONING_PASSWORD "replace-with-installation-provisioning-password"
+```
+
+`include/aiconnect_secrets.h` is intentionally git-ignored. The provisioning password must not be committed, printed to serial, shown in diagnostics, or exposed in the local web UI. Changing the provisioning password requires rebuilding and reflashing Bridges that should use the new credential.
+
 That credential is only allowed to:
 
 - publish `aic/v1/onboarding/register`

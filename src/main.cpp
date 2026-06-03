@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <base64.h>
+#include "aiconnect_secrets.h"
 #include "aiconnect_version.h"
 #include <mbedtls/base64.h>
 

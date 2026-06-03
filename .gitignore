@@ -1,5 +1,6 @@
 .platformio-core/
 .pio/
+include/aiconnect_secrets.h
 .DS_Store
 ._*
 backend/.env
