@@ -1,6 +1,6 @@
 #pragma once
 
-// Copy this file to include/aiconnect_secrets.h before compiling firmware.
+// Copy this file to bridge/include/aiconnect_secrets.h before compiling firmware.
 // The password is burned into the compiled ESP32 image and must match the
 // backend installation's MQTT provisioning credential.
 #define AICONNECT_PROVISIONING_USERNAME "aiconnect-provisioning"

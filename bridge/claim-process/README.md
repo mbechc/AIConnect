@@ -26,13 +26,13 @@ Before claim, the Bridge connects to the backend onboarding MQTT endpoint with a
 The provisioning username/password is burned into the compiled ESP32 firmware image. Before compiling firmware, create:
 
 ```text
-include/aiconnect_secrets.h
+bridge/include/aiconnect_secrets.h
 ```
 
 Use the committed template:
 
 ```text
-include/aiconnect_secrets.example.h
+bridge/include/aiconnect_secrets.example.h
 ```
 
 Example local secrets file:
@@ -44,7 +44,7 @@ Example local secrets file:
 #define AICONNECT_PROVISIONING_PASSWORD "replace-with-installation-provisioning-password"
 ```
 
-`include/aiconnect_secrets.h` is intentionally git-ignored. The provisioning password must not be committed, printed to serial, shown in diagnostics, or exposed in the local web UI. Changing the provisioning password requires rebuilding and reflashing Bridges that should use the new credential.
+`bridge/include/aiconnect_secrets.h` is intentionally git-ignored. The provisioning password must not be committed, printed to serial, shown in diagnostics, or exposed in the local web UI. Changing the provisioning password requires rebuilding and reflashing Bridges that should use the new credential.
 
 That credential is only allowed to:
 
@@ -78,7 +78,7 @@ If the Bridge cannot authenticate to onboarding MQTT, the setup UI must show:
 Authentication failed
 ```
 
-In that case, verify that `include/aiconnect_secrets.h` contains the real installation provisioning password and rebuild/reflash the Bridge.
+In that case, verify that `bridge/include/aiconnect_secrets.h` contains the real installation provisioning password and rebuild/reflash the Bridge.
 
 After backend registration succeeds, the setup UI displays the claim code and a state such as:
 

@@ -3,13 +3,13 @@
 Before compiling the M5Atom Lite firmware, create this local file:
 
 ```text
-include/aiconnect_secrets.h
+bridge/include/aiconnect_secrets.h
 ```
 
 Start from the template:
 
 ```text
-include/aiconnect_secrets.example.h
+bridge/include/aiconnect_secrets.example.h
 ```
 
 Required definitions:
@@ -25,7 +25,7 @@ The provisioning password is burned into the compiled ESP32 image. It must match
 
 Security rules:
 
-- Do not commit `include/aiconnect_secrets.h`.
+- Do not commit `bridge/include/aiconnect_secrets.h`.
 - Do not show the provisioning password in UI or diagnostics.
 - Do not print the provisioning password to serial logs.
 - Rebuild and reflash Bridges after changing the provisioning password.
