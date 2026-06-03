@@ -1,0 +1,34 @@
+onboarding:
+  status: "not_started" # not_started, in_progress, blocked, completed
+  current_phase: "initial"
+  last_completed_step: ""
+  next_step: ""
+
+phases:
+  mcp_access:
+    status: "not_checked"
+    notes: ""
+  github_access:
+    status: "not_checked"
+    notes: ""
+  prerequisites:
+    status: "not_checked"
+    notes: ""
+  backend_activation:
+    status: "not_started"
+    notes: ""
+  bridge_onboarding:
+    status: "not_started"
+    notes: ""
+  validation:
+    status: "not_started"
+    notes: ""
+  handover:
+    status: "not_started"
+    notes: ""
+
+blockers: []
+
+decisions: []
+
+change_log: []

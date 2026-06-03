@@ -1,0 +1,31 @@
+platform_inventory:
+  services:
+    - name: "api"
+      type: "FastAPI"
+      status: "unknown"
+    - name: "mcp"
+      type: "Model Context Protocol server"
+      status: "unknown"
+    - name: "postgres"
+      type: "PostgreSQL"
+      status: "unknown"
+    - name: "emqx"
+      type: "MQTT broker"
+      status: "unknown"
+    - name: "caddy"
+      type: "HTTPS reverse proxy"
+      status: "unknown"
+  integrations: []
+  organizations: []
+  sites: []
+  devices: []
+  repositories: []
+  environments: []
+
+health_checks:
+  last_run: ""
+  last_status: "unknown"
+  known_warnings: []
+  known_failures: []
+
+operational_notes: []

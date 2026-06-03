@@ -1,0 +1,24 @@
+customer:
+  name: ""
+  contact_person: ""
+  environment_type: "lab" # lab, pilot, production
+  github_repository: ""
+  primary_agent: "" # OpenClaw, Codex, other
+  mcp_enabled: false
+
+platform:
+  platform_name: "AI Connect"
+  deployment_target: ""
+  api_base_url: ""
+  mcp_endpoint: ""
+  mqtt_tls_endpoint: ""
+  authentication_method: "API admin token and MCP tool access"
+  integrations: []
+
+security:
+  secret_store: ""
+  production_change_approval_required: true
+  destructive_action_approval_required: true
+
+notes:
+  customer_specific_notes: ""
