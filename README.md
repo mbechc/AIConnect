@@ -18,19 +18,19 @@ First install and start the backend. Use `backend/README.md` for the backend ser
 
 After the backend is running, connect an MCP-enabled agent such as OpenClaw, Codex, or another compatible agent to this repository and to the AI Connect MCP server. The agent should use the operational documentation in this repository to configure the installation and guide the operator step by step.
 
-Start the agent with:
+Start the agent with this prompt file:
 
 ```text
-prompts/customer-start.md
+https://github.com/mbechc/AIConnect/blob/main/agentDocumentation/prompts/customer-start.md
 ```
 
 The agent-facing entrypoints are:
 
-- `AGENTS.md`
-- `docs/agent/00_START_HERE.md`
-- `runbooks/activate-platform.md`
-- `policies/`
-- `state/*.example.yaml`
+- `agentDocumentation/AGENTS.md`
+- `agentDocumentation/docs/agent/00_START_HERE.md`
+- `agentDocumentation/runbooks/activate-platform.md`
+- `agentDocumentation/policies/`
+- `agentDocumentation/state/*.example.yaml`
 
 Detailed backend and Bridge information remains in:
 

@@ -18,9 +18,9 @@ If the customer says:
 
 Use:
 
-- `docs/agent/10_CUSTOMER_ONBOARDING.md`
-- `docs/agent/20_PRECHECKS.md`
-- `runbooks/activate-platform.md`
+- `agentDocumentation/docs/agent/10_CUSTOMER_ONBOARDING.md`
+- `agentDocumentation/docs/agent/20_PRECHECKS.md`
+- `agentDocumentation/runbooks/activate-platform.md`
 
 If the customer says:
 
@@ -31,8 +31,8 @@ If the customer says:
 
 Use:
 
-- `docs/agent/50_DAY2_OPERATIONS.md`
-- `runbooks/check-platform-health.md`
+- `agentDocumentation/docs/agent/50_DAY2_OPERATIONS.md`
+- `agentDocumentation/runbooks/check-platform-health.md`
 
 If the customer says:
 
@@ -43,7 +43,7 @@ If the customer says:
 
 Use:
 
-- `docs/agent/60_TROUBLESHOOTING.md`
+- `agentDocumentation/docs/agent/60_TROUBLESHOOTING.md`
 
 If the customer says:
 
@@ -51,15 +51,15 @@ If the customer says:
 - "Add a device"
 - "Expand the platform"
 
-Use the relevant runbook under `runbooks/`.
+Use the relevant runbook under `agentDocumentation/runbooks/`.
 
 ## State Files
 
 Maintain customer-specific non-sensitive state in:
 
-- `state/customer-profile.yaml`
-- `state/onboarding-status.yaml`
-- `state/platform-inventory.yaml`
+- `agentDocumentation/state/customer-profile.yaml`
+- `agentDocumentation/state/onboarding-status.yaml`
+- `agentDocumentation/state/platform-inventory.yaml`
 
 If the real state files do not exist, create them from the example files after customer approval.
 

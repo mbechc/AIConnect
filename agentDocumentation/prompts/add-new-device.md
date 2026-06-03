@@ -2,7 +2,7 @@
 
 Use this prompt when the customer wants to add an AI Connect Bridge.
 
-Read `bridge/README.md`, `bridge/claim-process/README.md`, and `runbooks/add-new-device.md`.
+Read `bridge/README.md`, `bridge/claim-process/README.md`, and `agentDocumentation/runbooks/add-new-device.md`.
 
 Guide the customer through physical Bridge setup, backend registration, pending onboarding review, and claim into the approved site.
 

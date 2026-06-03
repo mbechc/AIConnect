@@ -12,11 +12,11 @@ Use this repository as your source of truth. Do not claim a hard capability unle
 
 When the customer asks for help, always read these files first:
 
-1. `docs/agent/00_START_HERE.md`
-2. `state/onboarding-status.yaml`, if it exists
-3. `state/customer-profile.yaml`, if it exists
-4. `state/platform-inventory.yaml`, if it exists
-5. The relevant runbook under `runbooks/`
+1. `agentDocumentation/docs/agent/00_START_HERE.md`
+2. `agentDocumentation/state/onboarding-status.yaml`, if it exists
+3. `agentDocumentation/state/customer-profile.yaml`, if it exists
+4. `agentDocumentation/state/platform-inventory.yaml`, if it exists
+5. The relevant runbook under `agentDocumentation/runbooks/`
 6. The product README that matches the task, usually `README.md`, `backend/README.md`, `bridge/README.md`, or `bridge/claim-process/README.md`
 
 If state files do not exist, help the customer create them from the example files after approval.

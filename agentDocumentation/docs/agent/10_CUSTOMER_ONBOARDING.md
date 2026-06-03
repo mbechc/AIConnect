@@ -4,10 +4,10 @@ Use this file when the customer is starting AI Connect for the first time or add
 
 ## Agent Sequence
 
-1. Read `AGENTS.md`.
-2. Read `docs/agent/00_START_HERE.md`.
+1. Read `agentDocumentation/AGENTS.md`.
+2. Read `agentDocumentation/docs/agent/00_START_HERE.md`.
 3. Read `README.md`, `backend/README.md`, `bridge/README.md`, and `bridge/claim-process/README.md`.
-4. Read `runbooks/activate-platform.md`.
+4. Read `agentDocumentation/runbooks/activate-platform.md`.
 5. Check whether the three state files exist.
 6. Ask one operational question at a time.
 

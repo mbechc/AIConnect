@@ -45,7 +45,7 @@ If the customer cannot provide a value, leave it blank and record a blocker or d
 
 ## State Update
 
-Update `state/customer-profile.yaml` and `state/onboarding-status.yaml` after approval.
+Update `agentDocumentation/state/customer-profile.yaml` and `agentDocumentation/state/onboarding-status.yaml` after approval.
 
 ## Completion Message
 

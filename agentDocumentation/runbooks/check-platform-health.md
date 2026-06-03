@@ -43,7 +43,7 @@ If a health check cannot run, mark it `Warning` or `Failed` with the missing evi
 
 ## State Update
 
-Update `state/platform-inventory.yaml` health summary after approval.
+Update `agentDocumentation/state/platform-inventory.yaml` health summary after approval.
 
 ## Completion Message
 

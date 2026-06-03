@@ -6,10 +6,10 @@ Use the GitHub repository I have connected through MCP as your source of truth.
 
 Start by reading:
 
-1. `AGENTS.md`
-2. `docs/agent/00_START_HERE.md`
-3. `docs/agent/10_CUSTOMER_ONBOARDING.md`
-4. `runbooks/activate-platform.md`
+1. `agentDocumentation/AGENTS.md`
+2. `agentDocumentation/docs/agent/00_START_HERE.md`
+3. `agentDocumentation/docs/agent/10_CUSTOMER_ONBOARDING.md`
+4. `agentDocumentation/runbooks/activate-platform.md`
 
 Then guide me through activation one step at a time.
 

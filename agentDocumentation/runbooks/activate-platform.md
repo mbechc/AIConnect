@@ -34,13 +34,13 @@ Approval is required before changing backend services, rotating provisioning cre
 ## Steps
 
 1. Ask: `Is this a lab, pilot, or production activation?`
-2. Read state files if present. If missing, ask approval to create them from `state/*.example.yaml`.
+2. Read state files if present. If missing, ask approval to create them from `agentDocumentation/state/*.example.yaml`.
 3. Check backend prerequisites from `backend/README.md`.
 4. Check MCP access and available AI Connect tools.
 5. Check GitHub access if issue or pull-request actions are expected.
 6. Collect customer profile fields one at a time.
 7. Identify required secrets by name or location only. Do not ask for secret values.
-8. Explain approval gates from `policies/approval-gates.md`.
+8. Explain approval gates from `agentDocumentation/policies/approval-gates.md`.
 9. Configure or validate installation settings only if approved and the tool exists.
 10. Create or validate organization and site only if approved.
 11. Guide Bridge preparation using `bridge/README.md`.

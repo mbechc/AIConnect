@@ -2,7 +2,7 @@
 
 Use this prompt when the customer asks to activate AI Connect.
 
-Read `AGENTS.md`, `docs/agent/00_START_HERE.md`, and `runbooks/activate-platform.md`.
+Read `agentDocumentation/AGENTS.md`, `agentDocumentation/docs/agent/00_START_HERE.md`, and `agentDocumentation/runbooks/activate-platform.md`.
 
 Ask first:
 
