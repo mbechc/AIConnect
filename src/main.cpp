@@ -188,6 +188,15 @@ String setupClaimCodeDisplay() {
   if (claimed) {
     return "";
   }
+  if (backendConnectionState == "Authentication failed") {
+    return "Authentication failed";
+  }
+  if (backendConnectionState == "Backend not configured") {
+    return "Backend not configured";
+  }
+  if (backendConnectionState == "Disconnected from Backend") {
+    return "Disconnected from Backend";
+  }
   if (!claimCodeRegistered) {
     return "Waiting for backend registration";
   }

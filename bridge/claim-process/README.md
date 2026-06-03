@@ -72,6 +72,14 @@ Before backend registration succeeds, the setup UI should show a state such as:
 Waiting for backend registration
 ```
 
+If the Bridge cannot authenticate to onboarding MQTT, the setup UI must show:
+
+```text
+Authentication failed
+```
+
+In that case, verify that `include/aiconnect_secrets.h` contains the real installation provisioning password and rebuild/reflash the Bridge.
+
 After backend registration succeeds, the setup UI displays the claim code and a state such as:
 
 ```text
