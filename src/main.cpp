@@ -63,6 +63,7 @@ String mqttHeartbeatTopic;
 uint16_t mqttPort = 8883;
 bool mqttTls = true;
 bool claimed = false;
+bool claimCodeRegistered = false;
 bool serialOpen = false;
 String activeSessionId;
 String backendConnectionState = "Backend not configured";
@@ -182,6 +183,16 @@ String controllerDisplay() {
   return savedController.length() ? savedController : String("not configured");
 }
 
+String setupClaimCodeDisplay() {
+  if (claimed) {
+    return "";
+  }
+  if (!claimCodeRegistered) {
+    return "Waiting for backend registration";
+  }
+  return savedClaimCode;
+}
+
 void refreshMqttConnectionState() {
   bool connectedNow = mqttClient.connected();
   if (wasMqttConnected && !connectedNow) {
@@ -239,6 +250,7 @@ void loadConfig() {
   savedPass = preferences.getString("wifi_pass", "");
   savedController = preferences.getString("controller", "");
   savedClaimCode = preferences.getString("claim_code", "");
+  claimCodeRegistered = preferences.getBool("claim_code_registered", false);
   savedCaPem = preferences.getString("mqtt_ca", "");
   claimStatus = preferences.getString("claim_status", "Not claimed");
   claimed = preferences.getBool("claimed", false);
@@ -251,6 +263,9 @@ void loadConfig() {
   mqttStatusTopic = preferences.getString("status_topic", "");
   mqttHeartbeatTopic = preferences.getString("heartbeat_topic", "");
   preferences.end();
+  if (!claimed && !claimCodeRegistered && claimStatus.startsWith("Claim code")) {
+    claimStatus = "Waiting for backend registration";
+  }
 }
 
 String generateClaimCode() {
@@ -269,9 +284,20 @@ String generateClaimCode() {
 void persistClaimCode(const String &code, const String &status) {
   savedClaimCode = code;
   claimStatus = status;
+  claimCodeRegistered = false;
   preferences.begin("aiconnect", false);
   preferences.putString("claim_code", savedClaimCode);
+  preferences.putBool("claim_code_registered", false);
   preferences.putULong("claim_code_started_ms", millis());
+  preferences.putString("claim_status", claimStatus);
+  preferences.end();
+}
+
+void markClaimCodeRegistered() {
+  claimCodeRegistered = true;
+  claimStatus = "Ready for operator claim";
+  preferences.begin("aiconnect", false);
+  preferences.putBool("claim_code_registered", true);
   preferences.putString("claim_status", claimStatus);
   preferences.end();
 }
@@ -281,7 +307,7 @@ void ensureClaimCode() {
     return;
   }
   if (savedClaimCode.isEmpty()) {
-    persistClaimCode(generateClaimCode(), "Claim code generated");
+    persistClaimCode(generateClaimCode(), "Waiting for backend registration");
   }
 }
 
@@ -293,15 +319,15 @@ void refreshClaimCodeExpiry() {
   uint32_t startedMs = preferences.getULong("claim_code_started_ms", 0);
   preferences.end();
   if (startedMs == 0) {
-    persistClaimCode(savedClaimCode, claimStatus.length() ? claimStatus : String("Claim code generated"));
+    persistClaimCode(savedClaimCode, claimStatus.length() ? claimStatus : String("Waiting for backend registration"));
     return;
   }
   if (millis() < startedMs) {
-    persistClaimCode(savedClaimCode, claimStatus.length() ? claimStatus : String("Claim code generated"));
+    persistClaimCode(savedClaimCode, claimStatus.length() ? claimStatus : String("Waiting for backend registration"));
     return;
   }
   if (millis() - startedMs >= kClaimCodeTtlMs) {
-    persistClaimCode(generateClaimCode(), "Claim code regenerated after expiry");
+    persistClaimCode(generateClaimCode(), "Waiting for backend registration");
     lastClaimPublishMs = 0;
   }
 }
@@ -372,6 +398,8 @@ void saveAcceptedClaim(JsonDocument &doc) {
   preferences.putString("status_topic", statusTopic ? statusTopic : "");
   preferences.putString("heartbeat_topic", heartbeatTopic ? heartbeatTopic : "");
   preferences.remove("claim_code");
+  preferences.remove("claim_code_started_ms");
+  preferences.remove("claim_code_registered");
   preferences.end();
 }
 
@@ -719,7 +747,7 @@ void runClaimLoop() {
     String payload = claimPayload();
     if (mqttClient.publish(claimRequestTopic().c_str(), payload.c_str(), false)) {
       markBackendContact();
-      saveClaimStatus("Pending onboarding registration sent");
+      markClaimCodeRegistered();
       backendConnectionState = "Claim pending";
     } else {
       lastMqttError = "claim request publish failed";
@@ -786,7 +814,7 @@ String htmlPage() {
   page += htmlEscape(savedCaPem);
   page += F("</textarea><div class='actions'><button id='saveController'>Save Controller</button></div><div class='msg' id='controllerMsg'></div></section>");
   page += F("<section class='panel' id='identity' hidden><h2>Identity</h2><div class='status' style='border-top:0;padding-top:0'>Enter this claim code in the AI Connect backend and assign the bridge to the correct organisation/site there.</div><label>Claim Code</label><div class='value mono' style='font-size:28px;margin:8px 0 12px' id='claimCode'>");
-  page += htmlEscape(savedClaimCode.length() ? savedClaimCode : String("generating"));
+  page += htmlEscape(setupClaimCodeDisplay());
   page += F("</div><div class='msg' id='identityMsg'></div><div class='status'>Claim status: <span class='mono' id='claimStatus'>");
   page += htmlEscape(claimStatus);
   page += F("</span></div></section>");
@@ -817,7 +845,7 @@ String htmlPage() {
   page += F("$('#scan').onclick=async()=>{const m=$('#wifiMsg');m.textContent='Scanning...';const nets=await fetch('/api/wifi/scan').then(r=>r.json());const s=$('#ssid');s.innerHTML='<option value=\"\">Choose network</option>';nets.forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+' dBm)';s.appendChild(o)});m.textContent=nets.length?'Select a network and save.':'No networks found.'};");
   page += F("$('#saveWifi').onclick=async()=>{$('#wifiMsg').textContent=await post('/api/wifi/save',{ssid:$('#ssid').value,pass:$('#pass').value});};");
   page += F("$('#saveController').onclick=async()=>{$('#controllerMsg').textContent=await post('/api/controller/save',{controller:$('#controllerHost').value,ca:$('#mqttCa').value});};");
-  page += F("async function refreshDiag(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());$('#claimStatus').textContent=d.claim_state;$('#claimCode').textContent=d.claim_code||'generating';$('#diagController').textContent=d.controller;$('#diagClaim').textContent=d.claim_state;$('#diagBackend').textContent=d.backend_connection_state;$('#diagContact').textContent=d.last_backend_contact;$('#diagError').textContent=d.last_mqtt_error;}catch(e){}}");
+  page += F("async function refreshDiag(){try{const d=await fetch('/api/diagnostics').then(r=>r.json());$('#claimStatus').textContent=d.claim_state;$('#claimCode').textContent=d.claim_code||'Waiting for backend registration';$('#diagController').textContent=d.controller;$('#diagClaim').textContent=d.claim_state;$('#diagBackend').textContent=d.backend_connection_state;$('#diagContact').textContent=d.last_backend_contact;$('#diagError').textContent=d.last_mqtt_error;}catch(e){}}");
   page += F("setInterval(refreshDiag,3000);refreshDiag();");
   page += F("</script></body></html>");
   return page;
@@ -922,19 +950,6 @@ void handleControllerSave() {
   server.send(200, "text/plain", "Controller saved.");
 }
 
-void handleClaimSave() {
-  String claim = server.arg("claim");
-  claim.trim();
-  preferences.begin("aiconnect", false);
-  preferences.putString("claim_code", claim);
-  preferences.putString("claim_status", claim.isEmpty() ? "Claim code cleared" : "Claim code saved");
-  preferences.end();
-  savedClaimCode = claim;
-  claimStatus = claim.isEmpty() ? "Claim code cleared" : "Claim code saved";
-  lastClaimPublishMs = 0;
-  server.send(200, "text/plain", claimStatus);
-}
-
 void handleClaimStatus() {
   server.send(200, "text/plain", claimStatus);
 }
@@ -944,7 +959,7 @@ void handleDiagnostics() {
   body += "\"device_id\":\"" + jsonEscape(deviceId) + "\",";
   body += "\"controller\":\"" + jsonEscape(controllerDisplay()) + "\",";
   body += "\"claim_state\":\"" + jsonEscape(claimed ? String("claimed") : claimStatus) + "\",";
-  body += "\"claim_code\":\"" + jsonEscape(claimed ? String("") : savedClaimCode) + "\",";
+  body += "\"claim_code\":\"" + jsonEscape(setupClaimCodeDisplay()) + "\",";
   body += "\"backend_connection_state\":\"" + jsonEscape(backendConnectionState) + "\",";
   body += "\"last_backend_contact\":\"" + jsonEscape(lastBackendContactText()) + "\",";
   body += "\"last_backend_contact_ms\":" + String(lastBackendContactMs) + ",";
