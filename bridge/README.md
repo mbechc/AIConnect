@@ -40,6 +40,32 @@ Short version:
 - backend returns per-device MQTT credentials
 - Bridge enters claimed mode and starts heartbeat/status/session behavior
 
+## Backend Diagnostic Tools
+
+The backend-side implementation prompt is here:
+
+[diagnostic-tools-backend-prompt.md](diagnostic-tools-backend-prompt.md)
+
+Claimed Bridges subscribe to:
+
+```text
+aic/v1/devices/{device_id}/commands/diagnostic
+```
+
+Supported tools:
+
+- `dns_lookup`
+- `tcp_connect`
+- `ping`
+
+Results are published as `diagnostic_result` events:
+
+```text
+aic/v1/devices/{device_id}/events
+```
+
+Each command must include `request_id`, `tool`, and structured `args`. The Bridge validates `device_id`, accepts only one running diagnostic at a time, applies hard limits for count/timeouts, and never executes arbitrary shell commands.
+
 ## Configure Secrets
 
 Before building, create the local secrets file from the template:
@@ -68,7 +94,7 @@ bridge/include/aiconnect_version.h
 Before building a new release, update:
 
 ```cpp
-#define AICONNECT_FIRMWARE_VERSION "0.2.9"
+#define AICONNECT_FIRMWARE_VERSION "0.3.0"
 ```
 
 Keep `AICONNECT_CONTRACT_VERSION` aligned with the backend MQTT contract, currently:

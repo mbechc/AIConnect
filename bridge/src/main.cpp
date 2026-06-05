@@ -9,6 +9,7 @@
 #include <base64.h>
 #include "aiconnect_secrets.h"
 #include "aiconnect_version.h"
+#include <ping/ping_sock.h>
 #include <mbedtls/base64.h>
 
 namespace {
@@ -25,6 +26,11 @@ constexpr uint32_t kHeartbeatMs = 30000;
 constexpr uint32_t kClaimRetryMs = 10000;
 constexpr uint32_t kClaimCodeTtlMs = 20UL * 60UL * 1000UL;
 constexpr uint32_t kResetHoldMs = 15000;
+constexpr uint8_t kDiagnosticMaxPingCount = 8;
+constexpr uint16_t kDiagnosticMaxHostLen = 96;
+constexpr uint16_t kDiagnosticMaxRequestIdLen = 80;
+constexpr uint32_t kDiagnosticDefaultTimeoutMs = 1000;
+constexpr uint32_t kDiagnosticMaxTimeoutMs = 5000;
 constexpr const char *kTopicPrefix = AICONNECT_CONTRACT_VERSION;
 constexpr const char *kFirmwareVersion = AICONNECT_FIRMWARE_VERSION;
 constexpr const char *kHardwareModel = AICONNECT_HARDWARE_MODEL;
@@ -37,6 +43,27 @@ struct ControllerEndpoint {
   uint16_t port = 8883;
   bool tls = true;
   bool valid = false;
+};
+
+struct DiagnosticJob {
+  bool active = false;
+  bool pingRunning = false;
+  bool pingDone = false;
+  String requestId;
+  String tool;
+  String host;
+  uint16_t port = 0;
+  uint8_t count = 0;
+  uint32_t timeoutMs = kDiagnosticDefaultTimeoutMs;
+  uint32_t startedMs = 0;
+  uint32_t tcpConnectMs = 0;
+  IPAddress resolvedIp;
+  esp_ping_handle_t pingHandle = nullptr;
+  uint32_t pingSent = 0;
+  uint32_t pingReceived = 0;
+  uint32_t pingMinMs = UINT32_MAX;
+  uint32_t pingMaxMs = 0;
+  uint32_t pingTotalMs = 0;
 };
 
 DNSServer dnsServer;
@@ -80,6 +107,7 @@ uint32_t heartbeatSeq = 0;
 uint32_t resetStartedMs = 0;
 bool ledOn = false;
 bool wasMqttConnected = false;
+DiagnosticJob diagnosticJob;
 
 String htmlEscape(const String &value) {
   String escaped;
@@ -500,6 +528,303 @@ void publishFactoryResetAck(const String &reason) {
   mqttClient.publish(deviceTopic("events").c_str(), payload.c_str(), false);
 }
 
+void publishDiagnosticResultHeader(JsonDocument &doc, const DiagnosticJob &job,
+                                   const String &status, uint32_t durationMs) {
+  doc["device_id"] = deviceId;
+  doc["event"] = "diagnostic_result";
+  doc["request_id"] = job.requestId;
+  doc["tool"] = job.tool;
+  doc["status"] = status;
+  doc["uptime_ms"] = millis();
+  doc["duration_ms"] = durationMs;
+  doc["wifi_rssi"] = WiFi.RSSI();
+}
+
+void publishDiagnosticRejected(const String &requestId, const String &tool,
+                               const String &reason) {
+  if (!mqttClient.connected()) {
+    return;
+  }
+  JsonDocument doc;
+  doc["device_id"] = deviceId;
+  doc["event"] = "diagnostic_result";
+  doc["request_id"] = requestId;
+  doc["tool"] = tool;
+  doc["status"] = "rejected";
+  doc["reason"] = reason;
+  doc["uptime_ms"] = millis();
+  doc["duration_ms"] = 0;
+  doc["wifi_rssi"] = WiFi.RSSI();
+  String payload;
+  serializeJson(doc, payload);
+  if (mqttClient.publish(deviceTopic("events").c_str(), payload.c_str(), false)) {
+    markBackendContact();
+  }
+}
+
+void publishDiagnosticJobResult(const DiagnosticJob &job, const String &status,
+                                const String &reason = "") {
+  if (!mqttClient.connected()) {
+    return;
+  }
+  JsonDocument doc;
+  publishDiagnosticResultHeader(doc, job, status, millis() - job.startedMs);
+  if (reason.length() > 0) {
+    doc["reason"] = reason;
+  }
+  JsonObject result = doc["result"].to<JsonObject>();
+  result["host"] = job.host;
+  if (job.resolvedIp != INADDR_NONE) {
+    result["resolved_ip"] = job.resolvedIp.toString();
+  }
+  if (job.tool == "dns_lookup") {
+    result["resolved"] = status == "completed";
+  } else if (job.tool == "tcp_connect") {
+    result["port"] = job.port;
+    result["connected"] = status == "completed";
+    result["timeout_ms"] = job.timeoutMs;
+    if (job.tcpConnectMs > 0) {
+      result["connect_ms"] = job.tcpConnectMs;
+    }
+  } else if (job.tool == "ping") {
+    result["sent"] = job.pingSent;
+    result["received"] = job.pingReceived;
+    result["loss_percent"] = job.pingSent > 0 ? ((job.pingSent - job.pingReceived) * 100UL) / job.pingSent : 100;
+    if (job.pingReceived > 0) {
+      result["min_ms"] = job.pingMinMs;
+      result["avg_ms"] = job.pingTotalMs / job.pingReceived;
+      result["max_ms"] = job.pingMaxMs;
+    }
+  }
+  String payload;
+  serializeJson(doc, payload);
+  if (mqttClient.publish(deviceTopic("events").c_str(), payload.c_str(), false)) {
+    markBackendContact();
+  }
+}
+
+void clearDiagnosticJob() {
+  if (diagnosticJob.pingHandle != nullptr) {
+    esp_ping_delete_session(diagnosticJob.pingHandle);
+  }
+  diagnosticJob = DiagnosticJob{};
+}
+
+uint32_t boundedTimeout(JsonVariantConst value) {
+  uint32_t timeoutMs = value.is<uint32_t>() ? value.as<uint32_t>() : kDiagnosticDefaultTimeoutMs;
+  if (timeoutMs == 0) {
+    timeoutMs = kDiagnosticDefaultTimeoutMs;
+  }
+  return min<uint32_t>(timeoutMs, kDiagnosticMaxTimeoutMs);
+}
+
+bool validDiagnosticText(const String &value, uint16_t maxLen) {
+  if (value.isEmpty() || value.length() > maxLen) {
+    return false;
+  }
+  for (uint16_t i = 0; i < value.length(); i++) {
+    char ch = value.charAt(i);
+    if (ch <= 32 || ch == '"' || ch == '\'' || ch == '\\') {
+      return false;
+    }
+  }
+  return true;
+}
+
+void runDnsDiagnostic() {
+  if (WiFi.status() != WL_CONNECTED) {
+    publishDiagnosticJobResult(diagnosticJob, "failed", "wifi not connected");
+    clearDiagnosticJob();
+    return;
+  }
+  IPAddress resolved;
+  if (!WiFi.hostByName(diagnosticJob.host.c_str(), resolved)) {
+    publishDiagnosticJobResult(diagnosticJob, "failed", "dns lookup failed");
+    clearDiagnosticJob();
+    return;
+  }
+  diagnosticJob.resolvedIp = resolved;
+  publishDiagnosticJobResult(diagnosticJob, "completed");
+  clearDiagnosticJob();
+}
+
+void runTcpConnectDiagnostic() {
+  if (WiFi.status() != WL_CONNECTED) {
+    publishDiagnosticJobResult(diagnosticJob, "failed", "wifi not connected");
+    clearDiagnosticJob();
+    return;
+  }
+  WiFiClient client;
+  uint32_t started = millis();
+  bool connected = client.connect(diagnosticJob.host.c_str(), diagnosticJob.port,
+                                  diagnosticJob.timeoutMs);
+  uint32_t elapsed = millis() - started;
+  diagnosticJob.tcpConnectMs = elapsed;
+  if (connected) {
+    client.stop();
+    publishDiagnosticJobResult(diagnosticJob, "completed");
+  } else {
+    publishDiagnosticJobResult(diagnosticJob, "failed", "tcp connect failed");
+  }
+  clearDiagnosticJob();
+}
+
+void onPingSuccess(esp_ping_handle_t hdl, void *args) {
+  (void)args;
+  uint32_t elapsedMs = 0;
+  if (esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsedMs,
+                           sizeof(elapsedMs)) == ESP_OK) {
+    diagnosticJob.pingReceived++;
+    diagnosticJob.pingTotalMs += elapsedMs;
+    diagnosticJob.pingMinMs = min<uint32_t>(diagnosticJob.pingMinMs, elapsedMs);
+    diagnosticJob.pingMaxMs = max<uint32_t>(diagnosticJob.pingMaxMs, elapsedMs);
+  }
+}
+
+void onPingEnd(esp_ping_handle_t hdl, void *args) {
+  (void)args;
+  uint32_t sent = 0;
+  uint32_t received = 0;
+  esp_ping_get_profile(hdl, ESP_PING_PROF_REQUEST, &sent, sizeof(sent));
+  esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &received, sizeof(received));
+  diagnosticJob.pingSent = sent;
+  diagnosticJob.pingReceived = received;
+  diagnosticJob.pingDone = true;
+}
+
+void startPingDiagnostic() {
+  if (WiFi.status() != WL_CONNECTED) {
+    publishDiagnosticJobResult(diagnosticJob, "failed", "wifi not connected");
+    clearDiagnosticJob();
+    return;
+  }
+  IPAddress resolved;
+  if (!WiFi.hostByName(diagnosticJob.host.c_str(), resolved)) {
+    publishDiagnosticJobResult(diagnosticJob, "failed", "dns lookup failed");
+    clearDiagnosticJob();
+    return;
+  }
+  diagnosticJob.resolvedIp = resolved;
+  ip_addr_t targetAddr;
+  IP_ADDR4(&targetAddr, resolved[0], resolved[1], resolved[2], resolved[3]);
+  esp_ping_config_t config = ESP_PING_DEFAULT_CONFIG();
+  config.count = diagnosticJob.count;
+  config.timeout_ms = diagnosticJob.timeoutMs;
+  config.interval_ms = 1000;
+  config.target_addr = targetAddr;
+  esp_ping_callbacks_t callbacks = {};
+  callbacks.on_ping_success = onPingSuccess;
+  callbacks.on_ping_end = onPingEnd;
+  if (esp_ping_new_session(&config, &callbacks, &diagnosticJob.pingHandle) != ESP_OK ||
+      diagnosticJob.pingHandle == nullptr) {
+    publishDiagnosticJobResult(diagnosticJob, "failed", "ping session create failed");
+    clearDiagnosticJob();
+    return;
+  }
+  diagnosticJob.pingRunning = true;
+  if (esp_ping_start(diagnosticJob.pingHandle) != ESP_OK) {
+    publishDiagnosticJobResult(diagnosticJob, "failed", "ping start failed");
+    clearDiagnosticJob();
+  }
+}
+
+void runDiagnosticJob() {
+  if (!diagnosticJob.active) {
+    return;
+  }
+  if (diagnosticJob.tool == "dns_lookup") {
+    runDnsDiagnostic();
+    return;
+  }
+  if (diagnosticJob.tool == "tcp_connect") {
+    runTcpConnectDiagnostic();
+    return;
+  }
+  if (diagnosticJob.tool == "ping") {
+    if (!diagnosticJob.pingRunning) {
+      startPingDiagnostic();
+      return;
+    }
+    uint32_t maxRuntime = (diagnosticJob.timeoutMs + 1000UL) * diagnosticJob.count + 2000UL;
+    if (diagnosticJob.pingDone) {
+      publishDiagnosticJobResult(diagnosticJob,
+                                 diagnosticJob.pingReceived > 0 ? "completed" : "failed",
+                                 diagnosticJob.pingReceived > 0 ? "" : "no ping replies");
+      clearDiagnosticJob();
+    } else if (millis() - diagnosticJob.startedMs > maxRuntime) {
+      esp_ping_stop(diagnosticJob.pingHandle);
+      publishDiagnosticJobResult(diagnosticJob, "failed", "ping diagnostic timeout");
+      clearDiagnosticJob();
+    }
+  }
+}
+
+void handleDiagnosticMessage(byte *payload, unsigned int length) {
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, payload, length);
+  if (err) {
+    publishDiagnosticRejected("", "", "invalid diagnostic payload");
+    lastMqttError = "invalid diagnostic payload";
+    return;
+  }
+
+  String command = doc["command"].as<String>();
+  String payloadDeviceId = doc["device_id"].as<String>();
+  String requestId = doc["request_id"].as<String>();
+  String tool = doc["tool"].as<String>();
+  JsonObjectConst args = doc["args"].as<JsonObjectConst>();
+
+  if (command != "diagnostic") {
+    publishDiagnosticRejected(requestId, tool, "invalid diagnostic command");
+    return;
+  }
+  if (payloadDeviceId != deviceId) {
+    publishDiagnosticRejected(requestId, tool, "device_id mismatch");
+    return;
+  }
+  if (!validDiagnosticText(requestId, kDiagnosticMaxRequestIdLen)) {
+    publishDiagnosticRejected(requestId, tool, "invalid request_id");
+    return;
+  }
+  if (!(tool == "dns_lookup" || tool == "tcp_connect" || tool == "ping")) {
+    publishDiagnosticRejected(requestId, tool, "unsupported diagnostic tool");
+    return;
+  }
+  if (args.isNull()) {
+    publishDiagnosticRejected(requestId, tool, "missing args");
+    return;
+  }
+  String host = args["host"].as<String>();
+  if (!validDiagnosticText(host, kDiagnosticMaxHostLen)) {
+    publishDiagnosticRejected(requestId, tool, "invalid host");
+    return;
+  }
+  if (diagnosticJob.active) {
+    publishDiagnosticRejected(requestId, tool, "diagnostic busy");
+    return;
+  }
+
+  diagnosticJob = DiagnosticJob{};
+  diagnosticJob.active = true;
+  diagnosticJob.requestId = requestId;
+  diagnosticJob.tool = tool;
+  diagnosticJob.host = host;
+  diagnosticJob.timeoutMs = boundedTimeout(args["timeout_ms"]);
+  diagnosticJob.startedMs = millis();
+  if (tool == "ping") {
+    uint8_t count = args["count"].is<uint8_t>() ? args["count"].as<uint8_t>() : 4;
+    diagnosticJob.count = count == 0 ? 4 : min<uint8_t>(count, kDiagnosticMaxPingCount);
+  } else if (tool == "tcp_connect") {
+    uint16_t port = args["port"].as<uint16_t>();
+    if (port == 0) {
+      publishDiagnosticRejected(requestId, tool, "invalid port");
+      clearDiagnosticJob();
+      return;
+    }
+    diagnosticJob.port = port;
+  }
+}
+
 bool decodeBase64(const String &encoded, uint8_t *out, size_t outSize, size_t &written) {
   written = 0;
   return mbedtls_base64_decode(out, outSize, &written,
@@ -665,6 +990,10 @@ void mqttCallback(char *topicRaw, byte *payload, unsigned int length) {
       handleFactoryResetMessage(payload, length);
       return;
     }
+    if (topic == commandTopic("diagnostic")) {
+      handleDiagnosticMessage(payload, length);
+      return;
+    }
     handleSessionMessage(topic, payload, length);
   }
 }
@@ -720,6 +1049,11 @@ bool connectMqtt(const ControllerEndpoint &endpoint, bool bootstrap) {
     }
     if (!mqttClient.subscribe(commandTopic("factory-reset").c_str(), 1)) {
       lastMqttError = "factory reset subscribe failed";
+      backendConnectionState = "Disconnected from Backend";
+      return false;
+    }
+    if (!mqttClient.subscribe(commandTopic("diagnostic").c_str(), 1)) {
+      lastMqttError = "diagnostic subscribe failed";
       backendConnectionState = "Disconnected from Backend";
       return false;
     }
@@ -795,6 +1129,7 @@ void runClaimedLoop() {
       lastHeartbeatMs = now;
       publishHeartbeat();
     }
+    runDiagnosticJob();
     publishSerialRx();
   }
 }
